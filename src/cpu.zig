@@ -242,7 +242,7 @@ pub const Cpu = struct {
         // Max age: organism dies after 10000 ticks without replicating
         // Replication resets age to 0, so active replicators are not affected
         if (self.age > 8000) {
-            maint += (self.age - 8000) / 500;
+            maint += (self.age - 8000) / 300;
         }
         return maint;
     }

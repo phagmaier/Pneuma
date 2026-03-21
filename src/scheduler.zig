@@ -6,7 +6,30 @@ const Cpu = cpu_mod.Cpu;
 const SIZE = Soup.SIZE;
 const MAXENERGY = cpu_mod.MAXENERGY;
 const T_CHALLENGE: u32 = 1500;
-const E_HARVEST: u32 = 600;
+const E_HARVEST: u32 = 500;
+const PASSIVE_DEPOSITS: u32 = 4000;
+const EPOCH2_START: u32 = 10_000;
+const EPOCH3_START: u32 = 50_000;
+const CHALLENGE_ADDR: u32 = 0;
+const MAX_CHALLENGE_OPS: usize = 5;
+
+const Challenge = struct {
+    input: u32,
+    target: u32,
+};
+
+const ChallengeOp = enum(u8) {
+    inc,
+    dec,
+    shl,
+    or1,
+};
+
+const ChallengeRecipe = struct {
+    ops: [MAX_CHALLENGE_OPS]ChallengeOp,
+    count: u8,
+    input_max: u32,
+};
 
 pub const Stats = struct {
     births: u32 = 0,
@@ -33,7 +56,10 @@ pub const Diagnostics = struct {
 pub const Scheduler = struct {
     tick: u32,
     nextId: u32,
+    challengeStage: u8,
+    challengeInput: u32,
     challengeTarget: u32,
+    challengeRecipe: ChallengeRecipe,
     challengeTimer: u32,
     allocator: std.mem.Allocator,
     rand: std.Random,
@@ -45,7 +71,10 @@ pub const Scheduler = struct {
         var sched = Scheduler{
             .tick = 0,
             .nextId = 0,
+            .challengeStage = 1,
+            .challengeInput = 0,
             .challengeTarget = 0,
+            .challengeRecipe = undefined,
             .challengeTimer = 0,
             .allocator = allocator,
             .rand = rand,
@@ -53,8 +82,12 @@ pub const Scheduler = struct {
             .soup = try Soup.init(allocator),
             .stats = .{},
         };
-        sched.challengeTarget = generateTarget(sched.tick, rand);
-        sched.soup.mem[0] = sched.challengeTarget;
+        sched.challengeStage = stageForTick(sched.tick);
+        sched.challengeRecipe = generateRecipe(sched.challengeStage, rand);
+        const challenge = generateChallenge(sched.challengeRecipe, rand);
+        sched.challengeInput = challenge.input;
+        sched.challengeTarget = challenge.target;
+        sched.soup.mem[CHALLENGE_ADDR] = challenge.input;
         return sched;
     }
 
@@ -374,6 +407,14 @@ pub const Scheduler = struct {
         return diag;
     }
 
+    pub fn challengeRecipeCode(self: *const Scheduler) u32 {
+        var code: u32 = 0;
+        for (0..self.challengeRecipe.count) |i| {
+            code = code * 10 + @as(u32, @intFromEnum(self.challengeRecipe.ops[i])) + 1;
+        }
+        return code;
+    }
+
     pub fn doTick(self: *Scheduler) !void {
         // 1. Shuffle execution order
         self.shuffle();
@@ -421,8 +462,8 @@ pub const Scheduler = struct {
             try self.cpus.append(self.allocator, child);
         }
 
-        // 7. Deposit passive energy at 10000 random addresses
-        for (0..10000) |_| {
+        // 7. Deposit passive energy at random occupied addresses
+        for (0..PASSIVE_DEPOSITS) |_| {
             const addr = self.rand.intRangeLessThan(u32, 0, SIZE);
             if (self.soup.occupied[addr]) |id| {
                 for (self.cpus.items) |*cpu| {
@@ -444,8 +485,15 @@ pub const Scheduler = struct {
         self.challengeTimer += 1;
         if (self.challengeTimer >= T_CHALLENGE) {
             self.challengeTimer = 0;
-            self.challengeTarget = generateTarget(self.tick, self.rand);
-            self.soup.mem[0] = self.challengeTarget;
+            const stage = stageForTick(self.tick);
+            if (stage != self.challengeStage) {
+                self.challengeStage = stage;
+                self.challengeRecipe = generateRecipe(stage, self.rand);
+            }
+            const challenge = generateChallenge(self.challengeRecipe, self.rand);
+            self.challengeInput = challenge.input;
+            self.challengeTarget = challenge.target;
+            self.soup.mem[CHALLENGE_ADDR] = challenge.input;
             for (self.cpus.items) |*cpu| {
                 cpu.harvested = false;
             }
@@ -463,52 +511,53 @@ pub const Scheduler = struct {
 
     pub fn loadAncestor(self: *Scheduler, addr: u32, energy: u32) !void {
         const n = Op.toNum;
-        // 41-instruction self-replicating ancestor with harvest
+        // 42-instruction self-replicating ancestor with epoch-1 harvest
         const program = [_]u32{
             // Start marker: nop1 nop1 nop0 nop0  (pos 0-3)
             n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
-            // Harvest: AX=0 → load mem[0] (challenge target) → harvest  (pos 4-6)
+            // Harvest: AX=0 → load challenge input → INC_A → harvest  (pos 4-7)
             n(.zero),
             n(.load),
+            n(.incA),
             n(.harvest),
-            // ADRB to find start marker  (pos 7)
+            // ADRB to find start marker
             n(.adrb),
-            // Template: 1 1 0 0 (backward search matches start marker 1 1 0 0)  (pos 8-11)
+            // Template: 1 1 0 0 (backward search matches start marker 1 1 0 0)
             n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
-            // Save start in stack, find end  (pos 12-13)
+            // Save start in stack, find end
             n(.pushA),
             n(.adrf),
-            // Template: 1 1 0 0 (forward complement search matches end marker 0 0 1 1)  (pos 14-17)
+            // Template: 1 1 0 0 (forward complement search matches end marker 0 0 1 1)
             n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
-            // BX=start, CX=length, allocate child  (pos 18-20)
+            // BX=start, CX=length, allocate child
             n(.popB),
             n(.subAB),
             n(.mal),
-            // Save child_start  (pos 21)
+            // Save child_start
             n(.pushA),
-            // Copy loop marker: nop0 nop1  (pos 22-23)
+            // Copy loop marker: nop0 nop1
             n(.nop0),  n(.nop1),
-            // Copy loop body: restore AX, discard CALL return addr  (pos 24-25)
+            // Copy loop body: restore AX, discard CALL return addr
             n(.popA),
             n(.popA),
-            // Copy one instruction with mutation  (pos 26)
+            // Copy one instruction with mutation
             n(.copy),
-            // Advance pointers  (pos 27-29)
+            // Advance pointers
             n(.incA),
             n(.incB),
             n(.decC),
-            // If CX!=0 skip DIVIDE  (pos 30)
+            // If CX!=0 skip DIVIDE
             n(.ifCZ),
-            // CX==0: spawn child  (pos 31)
+            // CX==0: spawn child
             n(.div),
-            // Save AX, find copy loop, jump back  (pos 32-36)
+            // Save AX, find copy loop, jump back
             n(.pushA),
             n(.adrb),
-            // Template: 0 1 (backward search matches copy loop marker 0 1)  (pos 34-35)
+            // Template: 0 1 (backward search matches copy loop marker 0 1)
             n(.nop0),  n(.nop1),
-            // CALL jumps to copy loop  (pos 36)
+            // CALL jumps to copy loop
             n(.call),
-            // End marker: nop0 nop0 nop1 nop1  (pos 37-40)
+            // End marker: nop0 nop0 nop1 nop1
             n(.nop0),  n(.nop0),  n(.nop1),  n(.nop1),
         };
 
@@ -524,36 +573,56 @@ pub const Scheduler = struct {
     }
 };
 
-fn applyRandomOp(val: u32, rand: std.Random) u32 {
-    return switch (rand.intRangeAtMost(u32, 0, 3)) {
-        0 => val +| 1,
-        1 => val -| 1,
-        2 => std.math.shl(u32, val, 1),
-        3 => val | 1,
-        else => val,
+fn applyChallengeOp(val: u32, op: ChallengeOp) u32 {
+    return switch (op) {
+        .inc => val +| 1,
+        .dec => val -| 1,
+        .shl => std.math.shl(u32, val, 1),
+        .or1 => val | 1,
     };
 }
 
-fn generateTarget(tick: u32, rand: std.Random) u32 {
-    if (tick < 50_000) {
-        // Epoch 1: constant 0–31 (ancestor uses LOAD to read target from mem[0])
-        return rand.intRangeAtMost(u32, 0, 31);
-    } else if (tick < 200_000) {
-        // Epoch 2: 2 operations on a small constant
-        var val = rand.intRangeAtMost(u32, 0, 15);
-        val = applyRandomOp(val, rand);
-        val = applyRandomOp(val, rand);
-        return val;
-    } else {
-        // Epoch 3: 3–5 operations on a small constant
-        var val = rand.intRangeAtMost(u32, 0, 7);
-        const numOps = rand.intRangeAtMost(u32, 3, 5);
-        var j: u32 = 0;
-        while (j < numOps) : (j += 1) {
-            val = applyRandomOp(val, rand);
-        }
-        return val;
+fn stageForTick(tick: u32) u8 {
+    if (tick < EPOCH2_START) return 1;
+    if (tick < EPOCH3_START) return 2;
+    return 3;
+}
+
+fn generateRecipe(stage: u8, rand: std.Random) ChallengeRecipe {
+    _ = rand;
+    var recipe = ChallengeRecipe{
+        .ops = undefined,
+        .count = 0,
+        .input_max = 0,
+    };
+    switch (stage) {
+        1 => {
+            recipe.ops[0] = .inc;
+            recipe.count = 1;
+            recipe.input_max = 30;
+        },
+        2 => {
+            recipe.ops[0] = .or1;
+            recipe.count = 1;
+            recipe.input_max = 15;
+        },
+        else => {
+            recipe.ops[0] = .shl;
+            recipe.ops[1] = .or1;
+            recipe.input_max = 7;
+            recipe.count = 2;
+        },
     }
+    return recipe;
+}
+
+fn generateChallenge(recipe: ChallengeRecipe, rand: std.Random) Challenge {
+    const input = rand.intRangeAtMost(u32, 0, recipe.input_max);
+    var val = input;
+    for (0..recipe.count) |i| {
+        val = applyChallengeOp(val, recipe.ops[i]);
+    }
+    return .{ .input = input, .target = val };
 }
 
 test "init" {

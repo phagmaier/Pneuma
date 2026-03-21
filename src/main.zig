@@ -75,7 +75,7 @@ pub fn main() !void {
             const s = &scheduler.stats;
             const diag = scheduler.diagnostics();
 
-            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} repl={d:<2} | births={d} deaths={d} harvests={d} reseeds={d} target={d} own={d} reserved={d} orphan={d} frag={d}\n", .{
+            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} repl={d:<2} | births={d} deaths={d} harvests={d} reseeds={d} challenge={d}->{d} stage={d} recipe={d} own={d} reserved={d} orphan={d} frag={d}\n", .{
                 scheduler.tick,
                 n,
                 avgE,
@@ -90,7 +90,10 @@ pub fn main() !void {
                 s.deaths,
                 s.harvests,
                 s.reseeds,
+                scheduler.challengeInput,
                 scheduler.challengeTarget,
+                scheduler.challengeStage,
+                scheduler.challengeRecipeCode(),
                 diag.owned_cells,
                 diag.reserved_child_cells,
                 diag.orphaned_cells,

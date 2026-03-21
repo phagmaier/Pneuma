@@ -22,6 +22,27 @@ Everything in the core simulation is functional and self-sustaining:
 - Logging: per-500-tick stats (pop, energy, size, births, deaths, harvests, reseeds), genome dump every 10K ticks
 - Re-seeding: fresh ancestor every 2000 ticks when pop < 10
 
+### Since the last major revision
+- Ownership invariants were tightened:
+  - Address `0` is reserved for the published challenge input
+  - Child reservations are freed on parent death
+  - `MAL` no longer allows a CPU to stack multiple outstanding child reservations
+  - Reseeding/ancestor loading only occurs into genuinely free regions
+- Diagnostics were added to logging:
+  - `own`, `reserved`, `orphan`, `frag`
+  - `orphan=0` and `frag=0` are now expected invariants in healthy runs
+- Challenge system was reworked:
+  - Soup publishes a public challenge input at address `0`
+  - Harvest rewards a derived internal target, not the raw soup value
+  - Challenge recipes are now curated by stage rather than fully random
+  - Current ladder:
+    - Stage 1: `inc`
+    - Stage 2: `or1`
+    - Stage 3: `shl -> or1`
+- Ancestor updated:
+  - Harvest routine is now `ZERO -> LOAD -> INC_A -> HARVEST`
+  - Ancestor length increased from 41 to 42 instructions
+
 ## What's NOT yet implemented
 - Snapshot saving every 10,000 ticks (save/resume simulation state)
 - Better visualization (TUI, spatial layout)
@@ -29,7 +50,20 @@ Everything in the core simulation is functional and self-sustaining:
 
 ## Current focus: experimentation and observation
 
-The simulation is self-sustaining through 74,000+ ticks with continuous replication, harvesting, and natural population oscillation (6-25 organisms). The energy economy is balanced. Next steps are running long experiments, observing emergent behavior, and tuning parameters to encourage more complex evolution.
+The simulator is now mechanically much cleaner than before: ownership leaks are fixed, diagnostics are available, and challenge publication is separated from challenge reward. The current bottleneck is ecological, not correctness.
+
+Recent experiments show:
+- The original economy allowed high-energy stagnation in epoch 1
+- A harsher passive-income / lower-harvest variant created turnover but mostly pushed the system into marginal survival and reseed dependence
+- A derived-target challenge with curated stage recipes is better than both earlier variants:
+  - Stage 2 is survivable
+  - Harvest can persist past the `10k` boundary
+  - But long runs still tend to compress into low-replication, aging lineages instead of sustaining a strong Red Queen dynamic
+
+The current goal is to tune the ecology so that:
+- Computation remains relevant to harvest
+- Long-lived non-replicating lineages cannot coast indefinitely
+- The system avoids both trivial equilibrium and simple starvation collapse
 
 ### Design goal
 Avoid Tierra's stagnation problem (equilibrium reached quickly, fitness landscape goes flat once a fast replicator emerges). The energy + challenge system creates a Red Queen dynamic where organisms must evolve increasingly complex computation to survive as challenge difficulty scales with epochs.
@@ -40,10 +74,12 @@ Avoid Tierra's stagnation problem (equilibrium reached quickly, fitness landscap
 | MAXENERGY | 10,000 | cpu.zig |
 | Starting energy (ancestor) | 3,000 | main.zig |
 | E_HARVEST | 600 | scheduler.zig |
+| Current E_HARVEST | 500 | scheduler.zig |
 | T_CHALLENGE | 1,500 | scheduler.zig |
 | Baseline maintenance | 0/tick + age tax | cpu.maintenanceCost() |
 | Age tax | (age-8000)/500 after 8000 ticks | cpu.maintenanceCost() |
 | Passive deposits/tick | 10,000 | scheduler.doTick() |
+| Current passive deposits/tick | 5,000 | scheduler.doTick() |
 | DIVIDE cost | 5 | scheduler.execute() |
 | Point mutation rate | 1/2000 | cpu.mutate() |
 | Insertion rate | 1/5000 | cpu.mutate() |
@@ -90,3 +126,12 @@ LOAD — AX = mem[AX], read soup memory into register
 - ADRF/ADRB: template is the NOP sequence at IP+1; complement means NOP_0<->NOP_1
 - ADRB searches backward from IP-1 but extracts template from IP+1 (same as ADRF)
 - Safe register access: reg()/setReg() in scheduler, getReg() in cpu return 0 for out-of-bounds
+
+## Current conclusions
+- The project is not doomed and the design is not inherently flawed
+- Energy plus challenge pressure is a viable direction, but the current ecology still allows eventual coasting/stagnation
+- Parameter tuning alone was not enough; structural challenge changes were necessary and helped
+- The next tuning axis is stronger anti-coasting pressure:
+  - lower passive inflow moderately
+  - increase late-life maintenance pressure
+  - keep the curated challenge ladder fixed while testing the energy economy
