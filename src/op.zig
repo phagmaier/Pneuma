@@ -40,7 +40,7 @@ pub const Op = enum(u32) {
     }
     pub fn toOp(num: u32) Op {
         const fields = @typeInfo(Op).@"enum".fields;
-        if (num >= fields.len) return .nop_0;
+        if (num >= fields.len) return .nop0;
         return @as(Op, @enumFromInt(num));
     }
     pub fn randOp(rand: std.Random) u32 {
