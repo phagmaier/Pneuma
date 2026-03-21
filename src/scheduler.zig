@@ -14,6 +14,7 @@ const REPRO_DIVIDE_COST: u32 = 32;
 const PASSIVE_DEPOSITS: u32 = 5000;
 const EPOCH2_START: u32 = 10_000;
 const EPOCH3_START: u32 = 50_000;
+const EPOCH4_START: u32 = 90_000;
 const CHALLENGE_ADDR: u32 = 0;
 const MAX_CHALLENGE_OPS: usize = 5;
 
@@ -606,7 +607,8 @@ fn applyChallengeOp(val: u32, op: ChallengeOp) u32 {
 fn stageForTick(tick: u32) u8 {
     if (tick < EPOCH2_START) return 1;
     if (tick < EPOCH3_START) return 2;
-    return 3;
+    if (tick < EPOCH4_START) return 3;
+    return 4;
 }
 
 fn generateRecipe(stage: u8, rand: std.Random) ChallengeRecipe {
@@ -628,6 +630,13 @@ fn generateRecipe(stage: u8, rand: std.Random) ChallengeRecipe {
             recipe.input_max = 15;
         },
         else => {
+            recipe.ops[0] = .shl;
+            recipe.ops[1] = .inc;
+            recipe.ops[2] = .or1;
+            recipe.input_max = 3;
+            recipe.count = 3;
+        },
+        3 => {
             recipe.ops[0] = .shl;
             recipe.ops[1] = .or1;
             recipe.input_max = 7;

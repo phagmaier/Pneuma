@@ -39,6 +39,7 @@ Everything in the core simulation is functional and self-sustaining:
     - Stage 1: `inc`
     - Stage 2: `or1`
     - Stage 3: `shl -> or1`
+    - Stage 4: `shl -> inc -> or1`
 - Ancestor updated:
   - Harvest routine is now `ZERO -> LOAD -> INC_A -> HARVEST`
   - Ancestor length increased from 41 to 42 instructions
@@ -65,6 +66,7 @@ Recent experiments show:
   - `DIVIDE` also requires reproduction reserve
   - Passive inflow and age tax were restored to the gentler baseline while testing this
   - Result: stage 2 remains active through `50k`, with replication still present and invariants intact, though the system still trends toward small-population plateaus instead of a strong arms race
+  - This is now the accepted baseline for future experiments
 
 The current goal is to tune the ecology so that:
 - Computation remains relevant to harvest
@@ -82,6 +84,9 @@ Avoid Tierra's stagnation problem (equilibrium reached quickly, fitness landscap
 | HARVEST survival reward | 150 | scheduler.zig |
 | HARVEST reproduction reserve | 384 | scheduler.zig |
 | T_CHALLENGE | 1,500 | scheduler.zig |
+| Epoch 2 start | 10,000 | scheduler.zig |
+| Epoch 3 start | 50,000 | scheduler.zig |
+| Epoch 4 start | 90,000 | scheduler.zig |
 | Baseline maintenance | 0/tick + age tax | cpu.maintenanceCost() |
 | Age tax | (age-8000)/500 after 8000 ticks | cpu.maintenanceCost() |
 | Passive deposits/tick | 10,000 | scheduler.doTick() |
@@ -144,8 +149,20 @@ LOAD — AX = mem[AX], read soup memory into register
   - curated challenge ladder fixed at `inc -> or1 -> shl+or1`
   - ownership diagnostics clean (`orphan=0`, `frag=0`)
   - harvest split into general survival energy plus reproduction reserve
+  - gentler passive ecology restored (`PASSIVE_DEPOSITS=5000`, age tax back to `(age-8000)/500`)
 - This baseline is better than the previous anti-coasting pass:
   - stage 2 remains replication-active through `50k`
   - the system no longer cleanly collapses at the `10k` boundary
   - but it still settles into small-population stage-2 plateaus rather than sustained escalating adaptation
 - The next tuning axis should focus on making stage progression and challenge complexity matter more, not just making starvation harsher
+- A later stage-4 epoch has been added so challenge complexity can continue increasing without changing the pre-`50k` baseline
+- Because stage 4 starts at `90k`, the usual `13k` and `50k` runs remain regression checks for the accepted baseline, not direct tests of stage 4
+
+## Accepted baseline
+- Keep the current reproduction-coupled energy model unless a future experiment clearly outperforms it
+- Treat `orphan=0` and `frag=0` as hard invariants during all future runs
+- Compare future experiments against this baseline at minimum on:
+  - `13k` for the stage-2 boundary
+  - `50k` for long-run persistence
+  - `100k` when testing stage-4 behavior directly
+  - replication, harvests, reseeds, and whether stage 2/3 remain active without collapse
