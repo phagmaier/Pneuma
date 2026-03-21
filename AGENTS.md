@@ -33,7 +33,17 @@ Everything in the core simulation is functional and self-sustaining:
   - `orphan=0` and `frag=0` are now expected invariants in healthy runs
 - Challenge system was reworked:
   - Soup publishes a public challenge input at address `0`
+  - Addresses `1..3` are reserved as challenge scratch slots
   - Harvest rewards a derived internal target, not the raw soup value
+  - Harvest now validates a register transcript, not just final `AX`
+    - Stage 1: `AX == target`
+    - Stage 2: `AX == target`, `BX == input`
+    - Stage 3: `AX == target`, `BX == input`, `CX == first intermediate`
+    - Stage 4: `AX == target`, `BX == first intermediate`, `CX == second intermediate`
+    - Stage 4 additionally requires a scratch-memory transcript in reserved soup:
+      - `mem[1] == input`
+      - `mem[2] == first intermediate`
+      - `mem[3] == second intermediate`
   - Challenge recipes are now curated by stage rather than fully random
   - Current ladder:
     - Stage 1: `inc`
@@ -41,8 +51,8 @@ Everything in the core simulation is functional and self-sustaining:
     - Stage 3: `shl -> or1`
     - Stage 4: `shl -> inc -> or1`
 - Ancestor updated:
-  - Harvest routine is now `ZERO -> LOAD -> INC_A -> HARVEST`
-  - Ancestor length increased from 41 to 42 instructions
+  - Harvest routine is now stage-2-ready: `ZERO -> LOAD -> PUSH_A -> POP_B -> INC_A -> HARVEST`
+  - Ancestor length increased to 44 instructions
 
 ## What's NOT yet implemented
 - Snapshot saving every 10,000 ticks (save/resume simulation state)
@@ -132,6 +142,9 @@ MOV_RA, MOV_AR
 COPY — copies mem[BX] to mem[AX] with mutation
 LOAD — AX = mem[AX], read soup memory into register
 
+### 0x22: Memory write
+STORE — mem[CX] = AX, currently only effective for reserved challenge scratch slots `1..3`
+
 ## Conventions
 - All addresses wrap mod 131,072 — always use Soup.wrap()
 - Fossil layer: soup.free() nulls ownership but never zeroes instruction data
@@ -149,6 +162,7 @@ LOAD — AX = mem[AX], read soup memory into register
   - curated challenge ladder fixed at `inc -> or1 -> shl+or1`
   - ownership diagnostics clean (`orphan=0`, `frag=0`)
   - harvest split into general survival energy plus reproduction reserve
+  - transcript-based harvest validation enabled
   - gentler passive ecology restored (`PASSIVE_DEPOSITS=5000`, age tax back to `(age-8000)/500`)
 - This baseline is better than the previous anti-coasting pass:
   - stage 2 remains replication-active through `50k`
@@ -157,6 +171,34 @@ LOAD — AX = mem[AX], read soup memory into register
 - The next tuning axis should focus on making stage progression and challenge complexity matter more, not just making starvation harsher
 - A later stage-4 epoch has been added so challenge complexity can continue increasing without changing the pre-`50k` baseline
 - Because stage 4 starts at `90k`, the usual `13k` and `50k` runs remain regression checks for the accepted baseline, not direct tests of stage 4
+- A `100k` run with stage 4 active showed:
+  - stage 3 is survivable but mostly produces small-population ancestor-like plateaus with frequent reseed support
+  - stage 4 (`shl -> inc -> or1`) is also survivable and not a hard cliff
+  - however, stage 4 still does not create a clear Red Queen dynamic; by `100k` the system can persist with low population and intermittent replication rather than escalating computational complexity
+- A follow-up structural change now requires witness registers for harvest, so later stages must preserve evidence of intermediate computation rather than only reaching the final target
+- After updating the ancestor to preserve the published input in `BX`, the `13k` boundary remains healthy under this stricter harvest rule:
+  - stage 2 stays harvest-active
+  - replication remains active
+  - invariants stay clean
+- A `50k` run on the transcript-validated baseline showed:
+  - the stricter harvest rule is survivable through stage 2
+  - stage 2 remains replication-active at `50k`
+  - but the system still spends long periods in low-harvest, reserved-child-heavy plateaus rather than sustaining a strong adaptive race
+- A follow-up `STORE` + scratch-memory transcript experiment was added:
+  - stage 4 now requires reserved scratch-slot evidence in soup, not just register witnesses
+  - `STORE` was added for this purpose
+  - reserved challenge memory now spans `0..3`
+- A `100k` run on that branch showed:
+  - pre-stage-4 behavior is essentially unchanged from the prior transcript-only version
+  - no lineage evolved meaningful use of the scratch-memory transcript by the `90k` boundary
+  - stage 4 therefore remained survivable only through the same low-harvest, reseed-supported plateau dynamics, not through a new computational regime
+- Current recommendation:
+  - keep the reproduction-coupled energy model and transcript-based harvest validation as the main baseline
+  - do not adopt the `STORE`/scratch-transcript branch as the new default yet
+  - the next work should focus on evolvability, not just harder challenge checks
+  - likely options are:
+    - seed a more stage-3/4-capable ancestor so evolution has a reachable path into deeper computation
+    - or add a more evolvable memory-write/computation primitive before requiring scratch-memory transcripts
 
 ## Accepted baseline
 - Keep the current reproduction-coupled energy model unless a future experiment clearly outperforms it
@@ -166,3 +208,6 @@ LOAD — AX = mem[AX], read soup memory into register
   - `50k` for long-run persistence
   - `100k` when testing stage-4 behavior directly
   - replication, harvests, reseeds, and whether stage 2/3 remain active without collapse
+- Baseline note:
+  - the accepted baseline is still the transcript-validated harvest model without requiring scratch-memory transcript writes
+  - the `STORE`/scratch-memory stage-4 branch is exploratory and did not outperform the accepted baseline

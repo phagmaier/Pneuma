@@ -130,7 +130,7 @@ pub fn main() !void {
                             "ia", "ib", "dc", "pA", "oA", "oB", "oC", "af",
                             "ab", "ca", "rt", "mB", "mD", "ml", "dv", "sn",
                             "pl", "ij", "mg", "hv", "ex", "sk", "rA", "aR",
-                            "cp", "ld",
+                            "cp", "ld", "st",
                         };
                         print("{s} ", .{names[opVal]});
                     } else {

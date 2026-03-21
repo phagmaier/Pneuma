@@ -8,6 +8,7 @@ const print = std.debug.print;
 
 pub const Soup = struct {
     pub const SIZE: u32 = 131_072;
+    pub const RESERVED_PREFIX_LEN: u32 = 4;
     mem: []u32,
     occupied: []?u32,
     scavenge: []u32,
@@ -25,7 +26,7 @@ pub const Soup = struct {
         return idx % SIZE;
     }
     pub fn isReserved(idx: u32) bool {
-        return wrap(idx) == 0;
+        return wrap(idx) < RESERVED_PREFIX_LEN;
     }
     pub fn incWrap(idx: u32) u32 {
         return @mod(idx +% 1, SIZE);

@@ -16,11 +16,16 @@ const EPOCH2_START: u32 = 10_000;
 const EPOCH3_START: u32 = 50_000;
 const EPOCH4_START: u32 = 90_000;
 const CHALLENGE_ADDR: u32 = 0;
+const CHALLENGE_TRACE0_ADDR: u32 = 1;
+const CHALLENGE_TRACE1_ADDR: u32 = 2;
+const CHALLENGE_TRACE2_ADDR: u32 = 3;
 const MAX_CHALLENGE_OPS: usize = 5;
 
 const Challenge = struct {
     input: u32,
     target: u32,
+    witness1: u32,
+    witness2: u32,
 };
 
 const ChallengeOp = enum(u8) {
@@ -64,6 +69,8 @@ pub const Scheduler = struct {
     challengeStage: u8,
     challengeInput: u32,
     challengeTarget: u32,
+    challengeWitness1: u32,
+    challengeWitness2: u32,
     challengeRecipe: ChallengeRecipe,
     challengeTimer: u32,
     allocator: std.mem.Allocator,
@@ -79,6 +86,8 @@ pub const Scheduler = struct {
             .challengeStage = 1,
             .challengeInput = 0,
             .challengeTarget = 0,
+            .challengeWitness1 = 0,
+            .challengeWitness2 = 0,
             .challengeRecipe = undefined,
             .challengeTimer = 0,
             .allocator = allocator,
@@ -92,6 +101,8 @@ pub const Scheduler = struct {
         const challenge = generateChallenge(sched.challengeRecipe, rand);
         sched.challengeInput = challenge.input;
         sched.challengeTarget = challenge.target;
+        sched.challengeWitness1 = challenge.witness1;
+        sched.challengeWitness2 = challenge.witness2;
         sched.soup.mem[CHALLENGE_ADDR] = challenge.input;
         return sched;
     }
@@ -113,6 +124,28 @@ pub const Scheduler = struct {
         cpu.energy = energy;
         self.soup._claim(id, region, size);
         try self.cpus.append(self.allocator, cpu);
+    }
+
+    const HarvestCheck = struct {
+        stage: u8,
+        input: u32,
+        target: u32,
+        witness1: u32,
+        witness2: u32,
+    };
+
+    fn harvestSatisfied(cpu: *const Cpu, soup: *const Soup, check: HarvestCheck) bool {
+        if (reg(cpu, 0) != check.target) return false;
+        return switch (check.stage) {
+            1 => true,
+            2 => reg(cpu, 1) == check.input,
+            3 => reg(cpu, 1) == check.input and reg(cpu, 2) == check.witness1,
+            else => reg(cpu, 1) == check.witness1 and
+                reg(cpu, 2) == check.witness2 and
+                soup.mem[CHALLENGE_TRACE0_ADDR] == check.input and
+                soup.mem[CHALLENGE_TRACE1_ADDR] == check.witness1 and
+                soup.mem[CHALLENGE_TRACE2_ADDR] == check.witness2,
+        };
     }
 
     fn findCpuIndexById(self: *Scheduler, id: u32) ?usize {
@@ -159,7 +192,7 @@ pub const Scheduler = struct {
         return false;
     }
 
-    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, challengeTarget: u32, stats: *Stats) !bool {
+    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, check: HarvestCheck, stats: *Stats) !bool {
         const AX: u8 = 0;
         const BX: u8 = 1;
         const CX: u8 = 2;
@@ -260,7 +293,7 @@ pub const Scheduler = struct {
             .inject => cpu.inject(soup.mem),
             .merge => cpu.merge(soup.occupied, soup.scavenge),
             .harvest => {
-                if (cpu.registers[AX] == challengeTarget and !cpu.harvested) {
+                if (harvestSatisfied(cpu, soup, check) and !cpu.harvested) {
                     cpu.energy = @min(cpu.energy + E_HARVEST_SURVIVAL, MAXENERGY);
                     cpu.reproEnergy = @min(cpu.reproEnergy + E_HARVEST_REPRO, MAXREPROENERGY);
                     cpu.harvested = true;
@@ -316,13 +349,13 @@ pub const Scheduler = struct {
                 if (!mr.skip) {
                     var dst = Soup.wrap(cpu.registers[AX]);
                     if (mr.insert_before) |ins| {
-                        if (dst != 0 and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
+                        if (!Soup.isReserved(dst) and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
                             if (inReservedChild(cpu, dst)) cpu.reproEnergy -= REPRO_COPY_COST;
                             soup.mem[dst] = ins;
                         }
                         dst = Soup.incWrap(dst);
                     }
-                    if (dst != 0 and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
+                    if (!Soup.isReserved(dst) and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
                         if (inReservedChild(cpu, dst)) cpu.reproEnergy -= REPRO_COPY_COST;
                         soup.mem[dst] = mr.value;
                     }
@@ -331,6 +364,12 @@ pub const Scheduler = struct {
             .load => {
                 // AX = mem[AX] — read soup memory into register
                 cpu.registers[AX] = soup.mem[Soup.wrap(cpu.registers[AX])];
+            },
+            .store => {
+                const dst = Soup.wrap(reg(cpu, CX));
+                if (dst >= CHALLENGE_TRACE0_ADDR and dst <= CHALLENGE_TRACE2_ADDR) {
+                    soup.mem[dst] = reg(cpu, AX);
+                }
             },
         }
         if (advance_ip) cpu.inc(SIZE);
@@ -437,6 +476,16 @@ pub const Scheduler = struct {
         return code;
     }
 
+    fn harvestCheck(self: *const Scheduler) HarvestCheck {
+        return .{
+            .stage = self.challengeStage,
+            .input = self.challengeInput,
+            .target = self.challengeTarget,
+            .witness1 = self.challengeWitness1,
+            .witness2 = self.challengeWitness2,
+        };
+    }
+
     pub fn doTick(self: *Scheduler) !void {
         // 1. Shuffle execution order
         self.shuffle();
@@ -451,7 +500,7 @@ pub const Scheduler = struct {
             var cpu = &self.cpus.items[i];
 
             // 2. Execute 1 instruction (sets cpu.cost)
-            const divHappened = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, self.challengeTarget, &self.stats);
+            const divHappened = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, self.harvestCheck(), &self.stats);
             const current_idx = self.cullZeroEnergy(current_id) orelse continue;
             cpu = &self.cpus.items[current_idx];
 
@@ -499,7 +548,7 @@ pub const Scheduler = struct {
 
         // 8. Cosmic ray — flip 1 random instruction every 3 ticks
         if (@mod(self.tick, 3) == 0) {
-            const cosmicAddr = self.rand.intRangeLessThan(u32, 1, SIZE);
+            const cosmicAddr = self.rand.intRangeLessThan(u32, Soup.RESERVED_PREFIX_LEN, SIZE);
             self.soup.mem[cosmicAddr] = Op.randOp(self.rand);
         }
 
@@ -515,7 +564,12 @@ pub const Scheduler = struct {
             const challenge = generateChallenge(self.challengeRecipe, self.rand);
             self.challengeInput = challenge.input;
             self.challengeTarget = challenge.target;
+            self.challengeWitness1 = challenge.witness1;
+            self.challengeWitness2 = challenge.witness2;
             self.soup.mem[CHALLENGE_ADDR] = challenge.input;
+            self.soup.mem[CHALLENGE_TRACE0_ADDR] = 0;
+            self.soup.mem[CHALLENGE_TRACE1_ADDR] = 0;
+            self.soup.mem[CHALLENGE_TRACE2_ADDR] = 0;
             for (self.cpus.items) |*cpu| {
                 cpu.harvested = false;
             }
@@ -533,13 +587,15 @@ pub const Scheduler = struct {
 
     pub fn loadAncestor(self: *Scheduler, addr: u32, energy: u32) !void {
         const n = Op.toNum;
-        // 42-instruction self-replicating ancestor with epoch-1 harvest
+        // 44-instruction self-replicating ancestor with stage-2-ready harvest staging
         const program = [_]u32{
             // Start marker: nop1 nop1 nop0 nop0  (pos 0-3)
             n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
-            // Harvest: AX=0 → load challenge input → INC_A → harvest  (pos 4-7)
+            // Harvest: AX=0 → load challenge input → preserve input in BX → INC_A → harvest
             n(.zero),
             n(.load),
+            n(.pushA),
+            n(.popB),
             n(.incA),
             n(.harvest),
             // ADRB to find start marker
@@ -649,10 +705,19 @@ fn generateRecipe(stage: u8, rand: std.Random) ChallengeRecipe {
 fn generateChallenge(recipe: ChallengeRecipe, rand: std.Random) Challenge {
     const input = rand.intRangeAtMost(u32, 0, recipe.input_max);
     var val = input;
+    var witness1: u32 = input;
+    var witness2: u32 = input;
     for (0..recipe.count) |i| {
         val = applyChallengeOp(val, recipe.ops[i]);
+        if (i == 0) witness1 = val;
+        if (i == 1) witness2 = val;
     }
-    return .{ .input = input, .target = val };
+    return .{
+        .input = input,
+        .target = val,
+        .witness1 = witness1,
+        .witness2 = witness2,
+    };
 }
 
 test "init" {
@@ -672,14 +737,14 @@ test "init" {
     const rand = prng.random();
     var scheduler = try Scheduler.init(allocator, rand);
     defer scheduler.deinit();
-    try scheduler.spawnOrganism(1, 10, 1000);
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 10, 1000);
     _ = try Scheduler.execute(
         scheduler.cpus.items,
         &scheduler.cpus.items[0],
         &scheduler.soup,
         scheduler.allocator,
         rand,
-        scheduler.challengeTarget,
+        scheduler.harvestCheck(),
         &scheduler.stats,
     );
 }

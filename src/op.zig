@@ -34,6 +34,7 @@ pub const Op = enum(u32) {
     movAR,
     copy,
     load,
+    store,
 
     pub fn toNum(op: Op) u32 {
         return @as(u32, @intFromEnum(op));

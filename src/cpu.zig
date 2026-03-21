@@ -204,7 +204,7 @@ pub const Cpu = struct {
             const offset: u32 = @intCast(i);
             const s = boundWrap(source + offset, soupSize, start, self.size);
             const d = @mod(dest + offset, soupSize);
-            if (d != 0) {
+            if (!@import("soup.zig").Soup.isReserved(d)) {
                 mem[d] = mem[s];
             }
         }
