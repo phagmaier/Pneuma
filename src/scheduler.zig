@@ -646,6 +646,11 @@ pub const Scheduler = struct {
             if (stage != self.challengeStage) {
                 self.challengeStage = stage;
                 self.challengeRecipe = generateRecipe(stage, self.rand);
+                if (stage >= 3) {
+                    const addr = self.rand.intRangeLessThan(u32, 1, SIZE);
+                    self.loadStage3Ancestor(addr, 3000) catch {};
+                    self.stats.reseeds += 1;
+                }
             }
             const challenge = generateChallenge(self.challengeRecipe, self.rand);
             self.challengeInput = challenge.input;
@@ -664,7 +669,11 @@ pub const Scheduler = struct {
         // 10. Re-seed if population is low (every 2000 ticks)
         if (@mod(self.tick, 2000) == 0 and self.cpus.items.len < 10) {
             const addr = self.rand.intRangeLessThan(u32, 1, SIZE);
-            self.loadAncestor(addr, 3000) catch {};
+            if (self.challengeStage >= 3) {
+                self.loadStage3Ancestor(addr, 3000) catch {};
+            } else {
+                self.loadAncestor(addr, 3000) catch {};
+            }
             self.stats.reseeds += 1;
         }
 
@@ -728,6 +737,61 @@ pub const Scheduler = struct {
             self.soup.mem[idx] = inst;
         }
         // Spawn organism at this address
+        try self.spawnOrganism(start, size, energy);
+    }
+
+    pub fn loadStage3Ancestor(self: *Scheduler, addr: u32, energy: u32) !void {
+        const n = Op.toNum;
+        // 47-instruction self-replicating ancestor with stage-3-ready harvest staging
+        const program = [_]u32{
+            // Start marker: nop1 nop1 nop0 nop0  (pos 0-3)
+            n(.nop1),    n(.nop1),  n(.nop0),  n(.nop0),
+            // Harvest: AX=0 → load input → BX=input → CX=(input<<1) → AX=((input<<1)|1) → harvest
+            n(.zero),    n(.load),  n(.pushA), n(.popB),
+            n(.shl),     n(.pushA), n(.popC),  n(.or1),
+            n(.harvest),
+            // ADRB to find start marker
+            n(.adrb),
+            // Template: 1 1 0 0 (backward search matches start marker 1 1 0 0)
+             n(.nop1),  n(.nop1),
+            n(.nop0),    n(.nop0),
+            // Save start in stack, find end
+             n(.pushA), n(.adrf),
+            // Template: 1 1 0 0 (forward complement search matches end marker 0 0 1 1)
+            n(.nop1),    n(.nop1),  n(.nop0),  n(.nop0),
+            // BX=start, CX=length, allocate child
+            n(.popB),    n(.subAB), n(.mal),
+            // Save child_start
+              n(.pushA),
+            // Copy loop marker: nop0 nop1
+            n(.nop0),    n(.nop1),
+            // Copy loop body: restore AX, discard CALL return addr
+             n(.popA),  n(.popA),
+            // Copy one instruction with mutation
+            n(.copy),
+            // Advance pointers
+               n(.incA),  n(.incB),  n(.decC),
+            // If CX!=0 skip DIVIDE
+            n(.ifCZ),
+            // CX==0: spawn child
+               n(.div),
+            // Save AX, find copy loop, jump back
+              n(.pushA), n(.adrb),
+            // Template: 0 1 (backward search matches copy loop marker 0 1)
+            n(.nop0),    n(.nop1),
+            // CALL jumps to copy loop
+             n(.call),
+            // End marker: nop0 nop0 nop1 nop1
+             n(.nop0),
+            n(.nop0),    n(.nop1),  n(.nop1),
+        };
+
+        const size: u32 = program.len;
+        const start = self.soup.findFree(addr, size, SIZE - 1) orelse return error.NoSpaceForAncestor;
+        for (program, 0..) |inst, i| {
+            const idx = Soup.wrap(start + @as(u32, @intCast(i)));
+            self.soup.mem[idx] = inst;
+        }
         try self.spawnOrganism(start, size, energy);
     }
 };

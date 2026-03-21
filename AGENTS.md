@@ -2,229 +2,102 @@
 
 Tierra-inspired alife simulator in Zig.
 
-## Files
-- `src/soup.zig` — circular memory buffer (131,072 u32 slots), ownership map, scavenge array, template search
-- `src/cpu.zig` — organism state (registers, stack, energy), push/pop, pull/inject/merge, mutation
-- `src/op.zig` — opcode enum, 34 ops (0x00–0x21 including COPY and LOAD)
-- `src/scheduler.zig` — Scheduler struct, execute() dispatch, tick loop, challenge system, ancestor loading
-- `src/main.zig` — entry point, seeds 5 ancestor organisms, logging
+## Code Map
+- `src/soup.zig` — circular memory, ownership map, scavenge, template search
+- `src/cpu.zig` — organism state, registers/stack growth, mutation, maintenance cost
+- `src/op.zig` — opcode enum
+- `src/scheduler.zig` — execution, energy economy, challenge system, ancestor loading
+- `src/main.zig` — startup, seeding, logging
 
-## What's implemented
-Everything in the core simulation is functional and self-sustaining:
-- Soup: circular buffer, ownership map, claim/free, template search (ADRF/ADRB/SCAN)
-- CPU: 4 registers (expandable to 8), stack depth 8 (expandable to 64), push/pop, grow/shrink
-- All 34 opcodes dispatched in scheduler.execute()
-- Energy system: per-instruction costs, maintenance, death + scavenge, passive income, harvest-fed reproduction reserve
-- Mutation system: point (1/2000), insertion (1/5000), deletion (1/5000) on COPY and PULL; cosmic rays every 3 ticks
-- Challenge system: epoch-based targets, HARVEST reward split between survival energy and reproduction reserve, T_CHALLENGE timer (1500 ticks)
-- Tick loop: shuffle -> execute -> energy deduction -> death -> maintenance -> passive deposits -> cosmic ray -> challenge
-- Ancestor: 41-instruction self-replicator with ZERO+LOAD+HARVEST routine, loaded at 5 addresses with 3000 energy each
-- Logging: per-500-tick stats (pop, energy, size, births, deaths, harvests, reseeds), genome dump every 10K ticks
-- Re-seeding: fresh ancestor every 2000 ticks when pop < 10
+## Hard Invariants
+- `orphan=0` and `frag=0` are required in healthy runs
+- Soup addresses wrap with `Soup.wrap()`
+- Reserved challenge slots are `0..3`
+  - `0` = public challenge input
+  - `1..3` = challenge trace slots
+- Child reservations must be freed on parent death
+- Reseeding / ancestor loading must only use genuinely free regions
 
-### Since the last major revision
-- Ownership invariants were tightened:
-  - Address `0` is reserved for the published challenge input
-  - Child reservations are freed on parent death
-  - `MAL` no longer allows a CPU to stack multiple outstanding child reservations
-  - Reseeding/ancestor loading only occurs into genuinely free regions
-- Diagnostics were added to logging:
-  - `own`, `reserved`, `orphan`, `frag`
-  - `orphan=0` and `frag=0` are now expected invariants in healthy runs
-- Challenge system was reworked:
-  - Soup publishes a public challenge input at address `0`
-  - Addresses `1..3` are reserved as challenge scratch slots
-  - Harvest rewards a derived internal target, not the raw soup value
-  - Harvest now validates a register transcript, not just final `AX`
-    - Stage 1: `AX == target`
-    - Stage 2: `AX == target`, `BX == input`
-    - Stage 3: `AX == target`, `BX == input`, `CX == first intermediate`
-    - Stage 4: `AX == target`, `BX == first intermediate`, `CX == second intermediate`
-    - Stage 4 additionally requires a scratch-memory transcript in reserved soup:
-      - `mem[1] == input`
-      - `mem[2] == first intermediate`
-      - `mem[3] == second intermediate`
-  - Challenge recipes are now curated by stage rather than fully random
-  - Current ladder:
-    - Stage 1: `inc`
-    - Stage 2: `or1`
-    - Stage 3: `shl -> or1`
-    - Stage 4: `shl -> inc -> or1`
-- Ancestor updated:
-  - Harvest routine is now stage-2-ready: `ZERO -> LOAD -> PUSH_A -> POP_B -> INC_A -> HARVEST`
-  - Ancestor length increased to 44 instructions
+## Current Baseline
+- Keep the reproduction-coupled energy model
+  - `HARVEST` gives survival energy plus reproduction reserve
+  - `COPY` into reserved child memory consumes reproduction reserve
+  - `DIVIDE` also consumes reproduction reserve
+- Keep transcript-based harvest validation
+  - Stage 1: `AX == target`
+  - Stage 2: `AX == target`, `BX == input`
+  - Stage 3: `AX == target`, `BX == input`, `CX == first intermediate`
+  - Stage 4: `AX == target`, `BX == first intermediate`, `CX == second intermediate`, plus scratch transcript in `mem[1..3]`
+- Challenge ladder
+  - Stage 1: `inc`
+  - Stage 2: `or1`
+  - Stage 3: `shl -> or1`
+  - Stage 4: `shl -> inc -> or1`
+- Epoch boundaries
+  - Stage 2 starts at `10k`
+  - Stage 3 starts at `50k`
+  - Stage 4 starts at `90k`
 
-## What's NOT yet implemented
-- Snapshot saving every 10,000 ticks (save/resume simulation state)
-- Better visualization (TUI, spatial layout)
-- Phylogenetic tracking (parent-child lineage trees)
+## Important Current Code State
+- `STORE` exists and writes `AX` to challenge trace slot `1 + min(CX, 2)`
+- Logging in `main.zig` includes:
+  - `harv`, `ph`, `repl`
+  - `hTry`, `tgt`, `s2`, `s3`, `s4r`, `s4f`
+  - `st`, `tw`
+  - ownership diagnostics
+- `scheduler.zig` currently also contains the active experiment branch:
+  - partial rewards for near-miss stage 3/4 harvests
+  - a stage-3-capable immigrant ancestor
+  - original stage-2 ancestor still used for initial seeding and pre-stage-3 reseeds
 
-## Current focus: experimentation and observation
+## Ancestors
+- Default ancestor: 44-instruction stage-2-capable self-replicator
+- Experimental immigrant ancestor: 47-instruction stage-3-capable self-replicator
+  - only injected once stage 3 begins
+  - also used for low-pop reseeds during stage 3+
 
-The simulator is now mechanically much cleaner than before: ownership leaks are fixed, diagnostics are available, and challenge publication is separated from challenge reward. The current bottleneck is ecological, not correctness.
+## What Failed
+- Harder challenge pressure alone did not produce a Red Queen dynamic
+- Stage-4 scratch-transcript requirement by itself did not evolve into use
+- Earlier stage-3 scratch requirement made runs worse
+- Graded rewards + observability alone did not solve the reachability problem
 
-Recent experiments show:
-- The original economy allowed high-energy stagnation in epoch 1
-- A harsher passive-income / lower-harvest variant created turnover but mostly pushed the system into marginal survival and reseed dependence
-- A derived-target challenge with curated stage recipes is better than both earlier variants:
-  - Stage 2 is survivable
-  - Harvest can persist past the `10k` boundary
-  - But long runs still tend to compress into low-replication, aging lineages instead of sustaining a strong Red Queen dynamic
-- A new reproduction-coupled energy model works better than pure anti-coasting pressure:
-  - `HARVEST` now gives a modest survival top-up plus a separate reproduction reserve
-  - Writing into reserved child memory via `COPY` consumes reproduction reserve
-  - `DIVIDE` also requires reproduction reserve
-  - Passive inflow and age tax were restored to the gentler baseline while testing this
-  - Result: stage 2 remains active through `50k`, with replication still present and invariants intact, though the system still trends toward small-population plateaus instead of a strong arms race
-  - This is now the accepted baseline for future experiments
+## What Worked Best So Far
+- The stage-3-immigrant branch is the first branch to produce clear stage-3 adaptation
+- Observed on that branch:
+  - `13k` remains healthy
+  - `50k` crosses into stage 3 with `s3 > 0`
+  - `100k` sustains 47-instruction stage-3-capable lineages through roughly `60k–90k`
+  - repeated stage-3 harvests occur
+- But it is still not a Red Queen:
+  - stage 4 still shuts the regime down
+  - `s4r` and `s4f` stay at `0`
+  - harvest falls back to `0` after the stage-4 transition
 
-The current goal is to tune the ecology so that:
-- Computation remains relevant to harvest
-- Long-lived non-replicating lineages cannot coast indefinitely
-- The system avoids both trivial equilibrium and simple starvation collapse
+## Current Read
+- The main bottleneck is no longer “can stage 3 computation exist?”
+- The active bottleneck is “how do stage-3-capable lineages bridge into stage 4?”
 
-### Design goal
-Avoid Tierra's stagnation problem (equilibrium reached quickly, fitness landscape goes flat once a fast replicator emerges). The energy + challenge system creates a Red Queen dynamic where organisms must evolve increasingly complex computation to survive as challenge difficulty scales with epochs.
+## Next Step
+Run a stage-4 bridge experiment from the stage-3-immigrant branch.
 
-### Parameter values
-| Parameter | Value | Location |
-|-----------|-------|----------|
-| MAXENERGY | 10,000 | cpu.zig |
-| Starting energy (ancestor) | 3,000 | main.zig |
-| HARVEST survival reward | 150 | scheduler.zig |
-| HARVEST reproduction reserve | 384 | scheduler.zig |
-| T_CHALLENGE | 1,500 | scheduler.zig |
-| Epoch 2 start | 10,000 | scheduler.zig |
-| Epoch 3 start | 50,000 | scheduler.zig |
-| Epoch 4 start | 90,000 | scheduler.zig |
-| Baseline maintenance | 0/tick + age tax | cpu.maintenanceCost() |
-| Age tax | (age-8000)/500 after 8000 ticks | cpu.maintenanceCost() |
-| Passive deposits/tick | 10,000 | scheduler.doTick() |
-| Current passive deposits/tick | 5,000 | scheduler.doTick() |
-| Reproduction reserve max | 2,048 | cpu.zig |
-| COPY reserve cost into child | 1/write | scheduler.execute() |
-| DIVIDE reserve cost | 32 | scheduler.execute() |
-| DIVIDE cost | 5 | scheduler.execute() |
-| Point mutation rate | 1/2000 | cpu.mutate() |
-| Insertion rate | 1/5000 | cpu.mutate() |
-| Deletion rate | 1/5000 | cpu.mutate() |
-| Cosmic rays | 1 every 3 ticks | scheduler.doTick() |
-| PULL cap | 64 | cpu.zig MAXPULL |
-| INJECT cap | 32 | cpu.zig MAXINJECT |
-| INJECT cost | 3/instruction | cpu.zig INJECTCOST |
-| MERGE cost | 2/instruction | cpu.zig MERGECOST |
-| EXTEND cost | 50 | cpu.zig EXTENDCOST |
-| MAL search range | 20x organism size | scheduler.execute() |
-| Re-seed threshold | pop < 10, every 2000 ticks | scheduler.doTick() |
-| Soup size | 131,072 | soup.zig SIZE |
+Best next options:
+1. Seed a minimally stage-4-capable immigrant only when stage 4 begins
+2. Make stage-4 scratch witness production more evolvable from the stage-3-capable lineage
 
-## Instruction set (all 34 ops)
+Recommended first:
+- Option 1
+- It tests the shortest remaining gap directly and cleanly
 
-### 0x00-0x0E: Arithmetic/stack
-NOP_0, NOP_1, OR1, SHL, ZERO, IF_CZ, SUB_AB, SUB_AC, INC_A, INC_B, DEC_C, PUSH_A, POP_A, POP_B, POP_C
+## Regression Targets
+- `13k` — stage-2 boundary health
+- `50k` — stage-3 entry / persistence
+- `100k` — stage-4 behavior
 
-### 0x0F-0x16: Memory and flow
-ADRF, ADRB, CALL, RET, MOV_AB, MOV_CD, MAL, DIVIDE
-
-### 0x17-0x1A: Cross-boundary
-SCAN, PULL, INJECT, MERGE
-
-### 0x1B: Harvest
-HARVEST
-
-### 0x1C-0x1D: Hardware evolution
-EXTEND, SHRINK
-
-### 0x1E-0x1F: Extended register access
-MOV_RA, MOV_AR
-
-### 0x20-0x21: Memory access
-COPY — copies mem[BX] to mem[AX] with mutation
-LOAD — AX = mem[AX], read soup memory into register
-
-### 0x22: Memory write
-STORE — writes `AX` into challenge trace slot `1 + min(CX, 2)`, so `CX=0/1/2` targets reserved slots `1/2/3`
-
-## Conventions
-- All addresses wrap mod 131,072 — always use Soup.wrap()
-- Fossil layer: soup.free() nulls ownership but never zeroes instruction data
-- Registers: AX=0 BX=1 CX=2 DX=3, extras R4+ via EXTEND
-- Energy is u32; saturating arithmetic, immediate death check after each deduction
-- ADRF/ADRB: template is the NOP sequence at IP+1; complement means NOP_0<->NOP_1
-- ADRB searches backward from IP-1 but extracts template from IP+1 (same as ADRF)
-- Safe register access: reg()/setReg() in scheduler, getReg() in cpu return 0 for out-of-bounds
-
-## Current conclusions
-- The project is not doomed and the design is not inherently flawed
-- Energy plus challenge pressure is a viable direction, but the current ecology still allows eventual coasting/stagnation
-- Parameter tuning alone was not enough; structural challenge and energy-flow changes were necessary and helped
-- The current best baseline is:
-  - curated challenge ladder fixed at `inc -> or1 -> shl+or1`
-  - ownership diagnostics clean (`orphan=0`, `frag=0`)
-  - harvest split into general survival energy plus reproduction reserve
-  - transcript-based harvest validation enabled
-  - gentler passive ecology restored (`PASSIVE_DEPOSITS=5000`, age tax back to `(age-8000)/500`)
-- This baseline is better than the previous anti-coasting pass:
-  - stage 2 remains replication-active through `50k`
-  - the system no longer cleanly collapses at the `10k` boundary
-  - but it still settles into small-population stage-2 plateaus rather than sustained escalating adaptation
-- The next tuning axis should focus on making stage progression and challenge complexity matter more, not just making starvation harsher
-- A later stage-4 epoch has been added so challenge complexity can continue increasing without changing the pre-`50k` baseline
-- Because stage 4 starts at `90k`, the usual `13k` and `50k` runs remain regression checks for the accepted baseline, not direct tests of stage 4
-- A `100k` run with stage 4 active showed:
-  - stage 3 is survivable but mostly produces small-population ancestor-like plateaus with frequent reseed support
-  - stage 4 (`shl -> inc -> or1`) is also survivable and not a hard cliff
-  - however, stage 4 still does not create a clear Red Queen dynamic; by `100k` the system can persist with low population and intermittent replication rather than escalating computational complexity
-- A follow-up structural change now requires witness registers for harvest, so later stages must preserve evidence of intermediate computation rather than only reaching the final target
-- After updating the ancestor to preserve the published input in `BX`, the `13k` boundary remains healthy under this stricter harvest rule:
-  - stage 2 stays harvest-active
-  - replication remains active
-  - invariants stay clean
-- A `50k` run on the transcript-validated baseline showed:
-  - the stricter harvest rule is survivable through stage 2
-  - stage 2 remains replication-active at `50k`
-  - but the system still spends long periods in low-harvest, reserved-child-heavy plateaus rather than sustaining a strong adaptive race
-- A follow-up `STORE` + scratch-memory transcript experiment was added:
-  - stage 4 now requires reserved scratch-slot evidence in soup, not just register witnesses
-  - `STORE` was added for this purpose
-  - reserved challenge memory now spans `0..3`
-- A `100k` run on that branch showed:
-  - pre-stage-4 behavior is essentially unchanged from the prior transcript-only version
-  - no lineage evolved meaningful use of the scratch-memory transcript by the `90k` boundary
-  - stage 4 therefore remained survivable only through the same low-harvest, reseed-supported plateau dynamics, not through a new computational regime
-- A follow-up experiment made scratch-memory relevant earlier by:
-  - keeping the easier `STORE` mapping
-  - requiring `mem[1] == input` already at stage 3
-- That earlier-scratch branch underperformed the accepted baseline:
-  - `13k` stayed healthy, but longer runs regressed
-  - `50k` reached a tiny ancestor-like plateau with `harv=0`
-  - `100k` again finished alive but with stage 3/4 flatlined at `harv=0`, frequent reseed support, and no new adaptive regime
-  - conclusion: earlier scratch requirements made the slope steeper before evolution had a reliable path into memory-writing
-- Current recommendation:
-  - keep the reproduction-coupled energy model and transcript-based harvest validation as the main baseline
-  - do not adopt the `STORE`/scratch-transcript branch as the new default yet
-  - do not adopt the earlier stage-3 scratch-witness branch either
-  - the next work should focus on evolvability gradients and observability, not just harder challenge checks
-  - immediate roadmap:
-    - restore stage 3 to transcript-only validation
-    - keep `STORE` available as an evolvable primitive
-    - add instrumentation for `HARVEST` attempts, witness-preservation hits, `STORE` use, and trace writes
-    - test graded rewards for partial stage-3/4 transcript success so near-miss computation is not completely invisible
-    - then compare against baseline at `13k`, `50k`, and `100k`
-  - medium-term roadmap:
-    - if graded rewards help, tune their magnitude to preserve pressure without turning partial solutions into a new equilibrium
-    - if graded rewards do not help, seed a minimally stage-3-capable ancestor on a separate branch
-    - only revisit mandatory scratch-memory transcripts after there is evidence that lineages are discovering and exploiting `STORE`
-
-## Accepted baseline
-- Keep the current reproduction-coupled energy model unless a future experiment clearly outperforms it
-- Treat `orphan=0` and `frag=0` as hard invariants during all future runs
-- Compare future experiments against this baseline at minimum on:
-  - `13k` for the stage-2 boundary
-  - `50k` for long-run persistence
-  - `100k` when testing stage-4 behavior directly
-  - replication, harvests, reseeds, and whether stage 2/3 remain active without collapse
-- Baseline note:
-  - the accepted baseline is still the transcript-validated harvest model without requiring scratch-memory transcript writes
-  - the `STORE`/scratch-memory stage-4 branch is exploratory and did not outperform the accepted baseline
-  - the later earlier-scratch stage-3 experiment also did not outperform the accepted baseline and should not be treated as default
+For each run, check:
+- population and replication
+- `harv` / `ph`
+- `s3`, `s4r`, `s4f`
+- `st`, `tw`
+- reseed dependence
+- `orphan=0`, `frag=0`
