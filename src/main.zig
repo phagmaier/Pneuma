@@ -73,8 +73,9 @@ pub fn main() !void {
             const avgE = totalEnergy / n;
             const avgS = totalSize / n;
             const s = &scheduler.stats;
+            const diag = scheduler.diagnostics();
 
-            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} repl={d:<2} | births={d} deaths={d} reseeds={d} target={d}\n", .{
+            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} repl={d:<2} | births={d} deaths={d} harvests={d} reseeds={d} target={d} own={d} reserved={d} orphan={d} frag={d}\n", .{
                 scheduler.tick,
                 n,
                 avgE,
@@ -87,8 +88,13 @@ pub fn main() !void {
                 numReplicating,
                 s.births,
                 s.deaths,
+                s.harvests,
                 s.reseeds,
                 scheduler.challengeTarget,
+                diag.owned_cells,
+                diag.reserved_child_cells,
+                diag.orphaned_cells,
+                diag.fragmented_cpus,
             });
 
             s.reset();
@@ -96,7 +102,15 @@ pub fn main() !void {
 
         // Detailed genome dump every 10000 ticks
         if (@mod(scheduler.tick, 10000) == 0) {
+            const diag = scheduler.diagnostics();
             print("\n--- Genome snapshot at tick {d} ---\n", .{scheduler.tick});
+            print("diag: own={d} contiguous={d} reserved={d} orphan={d} fragmented={d}\n", .{
+                diag.owned_cells,
+                diag.contiguous_cells,
+                diag.reserved_child_cells,
+                diag.orphaned_cells,
+                diag.fragmented_cpus,
+            });
             const cpus = scheduler.cpus.items;
             const maxDump = @min(cpus.len, 5); // dump up to 5 organisms
             for (cpus[0..maxDump], 0..) |cpu, i| {
@@ -127,5 +141,9 @@ pub fn main() !void {
         }
     }
 
-    print("All organisms dead at tick {d}\n", .{scheduler.tick});
+    if (scheduler.cpus.items.len == 0) {
+        print("All organisms dead at tick {d}\n", .{scheduler.tick});
+    } else if (maxTicks) |limit| {
+        print("Stopped at tick {d} due to maxTicks={d}\n", .{scheduler.tick, limit});
+    }
 }

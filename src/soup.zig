@@ -24,6 +24,9 @@ pub const Soup = struct {
     pub fn wrap(idx: u32) u32 {
         return idx % SIZE;
     }
+    pub fn isReserved(idx: u32) bool {
+        return wrap(idx) == 0;
+    }
     pub fn incWrap(idx: u32) u32 {
         return @mod(idx +% 1, SIZE);
     }
@@ -35,6 +38,7 @@ pub const Soup = struct {
         return self.occupied[idx];
     }
     pub fn isOccupied(self: *Soup, idx: u32) bool {
+        if (isReserved(idx)) return true;
         const occupant = self.getOccupant(idx);
         if (occupant) |_| {
             return true;
@@ -63,6 +67,12 @@ pub const Soup = struct {
     }
 
     pub fn claim(self: *Soup, start: u32, size: u32, id: u32, searchSize: u32) ?u32 {
+        const newStart = self.findFree(start, size, searchSize) orelse return null;
+        self._claim(id, newStart, size);
+        return newStart;
+    }
+
+    pub fn findFree(self: *Soup, start: u32, size: u32, searchSize: u32) ?u32 {
         var count: u32 = 0;
         var newStart: u32 = start;
         for (0..searchSize) |i| {
@@ -74,7 +84,6 @@ pub const Soup = struct {
                 count += 1;
                 if (count == 1) newStart = start + offset;
                 if (count == size) {
-                    self._claim(id, newStart, size);
                     return wrap(newStart);
                 }
             }

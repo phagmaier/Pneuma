@@ -22,6 +22,14 @@ pub const Stats = struct {
     }
 };
 
+pub const Diagnostics = struct {
+    owned_cells: u32 = 0,
+    contiguous_cells: u32 = 0,
+    reserved_child_cells: u32 = 0,
+    orphaned_cells: u32 = 0,
+    fragmented_cpus: u32 = 0,
+};
+
 pub const Scheduler = struct {
     tick: u32,
     nextId: u32,
@@ -59,12 +67,36 @@ pub const Scheduler = struct {
     }
 
     pub fn spawnOrganism(self: *Scheduler, start: u32, size: u32, energy: u32) !void {
+        const region = self.soup.findFree(start, size, size) orelse return error.RegionOccupied;
+        if (region != Soup.wrap(start)) return error.RegionOccupied;
         const id = self.nextId;
         self.nextId += 1;
-        var cpu = try Cpu.init(self.allocator, id, start, size);
+        var cpu = try Cpu.init(self.allocator, id, region, size);
         cpu.energy = energy;
-        self.soup._claim(id, start, size);
+        self.soup._claim(id, region, size);
         try self.cpus.append(self.allocator, cpu);
+    }
+
+    fn findCpuIndexById(self: *Scheduler, id: u32) ?usize {
+        for (self.cpus.items, 0..) |cpu, idx| {
+            if (cpu.id == id) return idx;
+        }
+        return null;
+    }
+
+    fn cullZeroEnergy(self: *Scheduler, current_id: u32) ?usize {
+        var current_alive = true;
+        var idx: usize = 0;
+        while (idx < self.cpus.items.len) {
+            if (self.cpus.items[idx].energy == 0) {
+                if (self.cpus.items[idx].id == current_id) current_alive = false;
+                self.kill(idx);
+                continue;
+            }
+            idx += 1;
+        }
+        if (!current_alive) return null;
+        return self.findCpuIndexById(current_id);
     }
 
     fn getOp(_idx: u32, soup: *const Soup) Op {
@@ -80,7 +112,7 @@ pub const Scheduler = struct {
         if (idx < cpu.registers.len) cpu.registers[idx] = val;
     }
 
-    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, challengeTarget: u32) !bool {
+    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, challengeTarget: u32, stats: *Stats) !bool {
         const AX: u8 = 0;
         const BX: u8 = 1;
         const CX: u8 = 2;
@@ -149,7 +181,7 @@ pub const Scheduler = struct {
 
             .mal => {
                 const cpySize = reg(cpu, CX);
-                if (cpySize > 0 and cpySize <= cpu.size) {
+                if (cpu.childSize == 0 and cpySize > 0 and cpySize <= cpu.size) {
                     const searchSize = cpu.size * 20;
                     const result = soup.claim(Soup.wrap(cpu.start + cpu.size), cpySize, cpu.id, searchSize);
                     if (result) |start| {
@@ -183,6 +215,7 @@ pub const Scheduler = struct {
                 if (cpu.registers[AX] == challengeTarget and !cpu.harvested) {
                     cpu.energy = @min(cpu.energy + E_HARVEST, MAXENERGY);
                     cpu.harvested = true;
+                    stats.harvests += 1;
                 }
             },
             .extend => {
@@ -234,10 +267,10 @@ pub const Scheduler = struct {
                 if (!mr.skip) {
                     var dst = Soup.wrap(cpu.registers[AX]);
                     if (mr.insert_before) |ins| {
-                        soup.mem[dst] = ins;
+                        if (dst != 0) soup.mem[dst] = ins;
                         dst = Soup.incWrap(dst);
                     }
-                    soup.mem[dst] = mr.value;
+                    if (dst != 0) soup.mem[dst] = mr.value;
                 }
             },
             .load => {
@@ -269,6 +302,9 @@ pub const Scheduler = struct {
 
         // 2. Free ownership (leave instruction data — fossil layer)
         self.soup.free(cpu.start, cpu.size);
+        if (cpu.childSize > 0) {
+            self.soup.free(cpu.childStart, cpu.childSize);
+        }
 
         // 3. Deallocate CPU resources and remove from list
         cpu.deinit(self.allocator);
@@ -314,6 +350,30 @@ pub const Scheduler = struct {
         }
     }
 
+    pub fn diagnostics(self: *Scheduler) Diagnostics {
+        var diag = Diagnostics{};
+        for (self.soup.occupied) |owner| {
+            if (owner != null) diag.owned_cells += 1;
+        }
+        for (self.cpus.items) |cpu| {
+            var contiguous: u32 = 0;
+            for (0..cpu.size) |i| {
+                const addr = Soup.wrap(cpu.start + @as(u32, @intCast(i)));
+                if (self.soup.occupied[addr] == cpu.id) {
+                    contiguous += 1;
+                }
+            }
+            diag.contiguous_cells += contiguous;
+            if (contiguous != cpu.size) diag.fragmented_cpus += 1;
+            diag.reserved_child_cells += cpu.childSize;
+        }
+        const accounted_cells = diag.contiguous_cells + diag.reserved_child_cells;
+        if (diag.owned_cells > accounted_cells) {
+            diag.orphaned_cells = diag.owned_cells - accounted_cells;
+        }
+        return diag;
+    }
+
     pub fn doTick(self: *Scheduler) !void {
         // 1. Shuffle execution order
         self.shuffle();
@@ -324,10 +384,13 @@ pub const Scheduler = struct {
 
         var i: usize = 0;
         while (i < self.cpus.items.len) {
+            const current_id = self.cpus.items[i].id;
             var cpu = &self.cpus.items[i];
 
             // 2. Execute 1 instruction (sets cpu.cost)
-            const divHappened = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, self.challengeTarget);
+            const divHappened = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, self.challengeTarget, &self.stats);
+            const current_idx = self.cullZeroEnergy(current_id) orelse continue;
+            cpu = &self.cpus.items[current_idx];
 
             // Handle DIVIDE — spawn child before energy deduction
             if (divHappened) {
@@ -336,7 +399,7 @@ pub const Scheduler = struct {
 
             // 3. Deduct per-instruction energy cost
             if (cpu.energy <= cpu.cost) {
-                self.kill(i);
+                self.kill(current_idx);
                 continue;
             }
             cpu.energy -= cpu.cost;
@@ -344,13 +407,13 @@ pub const Scheduler = struct {
             // 5. Deduct baseline (2) + hardware maintenance costs
             const maint = cpu.maintenanceCost();
             if (cpu.energy <= maint) {
-                self.kill(i);
+                self.kill(current_idx);
                 continue;
             }
             cpu.energy -= maint;
 
             cpu.age += 1;
-            i += 1;
+            i = current_idx + 1;
         }
 
         // Add newborn children (they execute next tick)
@@ -373,7 +436,7 @@ pub const Scheduler = struct {
 
         // 8. Cosmic ray — flip 1 random instruction every 3 ticks
         if (@mod(self.tick, 3) == 0) {
-            const cosmicAddr = self.rand.intRangeLessThan(u32, 0, SIZE);
+            const cosmicAddr = self.rand.intRangeLessThan(u32, 1, SIZE);
             self.soup.mem[cosmicAddr] = Op.randOp(self.rand);
         }
 
@@ -450,13 +513,14 @@ pub const Scheduler = struct {
         };
 
         const size: u32 = program.len;
+        const start = self.soup.findFree(addr, size, SIZE - 1) orelse return error.NoSpaceForAncestor;
         // Write program into soup memory
         for (program, 0..) |inst, i| {
-            const idx = Soup.wrap(addr + @as(u32, @intCast(i)));
+            const idx = Soup.wrap(start + @as(u32, @intCast(i)));
             self.soup.mem[idx] = inst;
         }
         // Spawn organism at this address
-        try self.spawnOrganism(addr, size, energy);
+        try self.spawnOrganism(start, size, energy);
     }
 };
 
@@ -509,7 +573,14 @@ test "init" {
     const rand = prng.random();
     var scheduler = try Scheduler.init(allocator, rand);
     defer scheduler.deinit();
-    var cpu = try Cpu.init(allocator, 0, 0, 10);
-    try scheduler.cpus.append(scheduler.allocator, cpu);
-    _ = try Scheduler.execute(scheduler.cpus.items, &cpu, &scheduler.soup, scheduler.allocator, rand, scheduler.challengeTarget);
+    try scheduler.spawnOrganism(1, 10, 1000);
+    _ = try Scheduler.execute(
+        scheduler.cpus.items,
+        &scheduler.cpus.items[0],
+        &scheduler.soup,
+        scheduler.allocator,
+        rand,
+        scheduler.challengeTarget,
+        &scheduler.stats,
+    );
 }

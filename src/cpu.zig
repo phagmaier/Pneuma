@@ -200,7 +200,9 @@ pub const Cpu = struct {
             const offset: u32 = @intCast(i);
             const s = boundWrap(source + offset, soupSize, start, self.size);
             const d = @mod(dest + offset, soupSize);
-            mem[d] = mem[s];
+            if (d != 0) {
+                mem[d] = mem[s];
+            }
         }
         if (size > 0) self.cost = size * INJECTCOST;
     }
@@ -208,11 +210,15 @@ pub const Cpu = struct {
     pub fn merge(self: *Cpu, occ: []?u32, scavenge: []u32) void {
         const maxSize = @min(self.getReg(2), self.energy / MERGECOST);
         const soupSize = @as(u32, @intCast(occ.len));
+        const expectedStart = @mod(self.start + self.size, soupSize);
         const start = @mod(self.getReg(0), soupSize);
+        if (start != expectedStart or start == 0) return;
         var count: u32 = 0;
         for (0..maxSize) |i| {
             const idx = @mod(start + @as(u32, @intCast(i)), soupSize);
-            if (occ[idx]) |_| {
+            if (idx == 0) {
+                break;
+            } else if (occ[idx]) |_| {
                 break;
             } else {
                 self.size += 1;
