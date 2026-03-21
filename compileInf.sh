@@ -1,4 +1,4 @@
 #!/bin/bash
 zig build -Doptimize=ReleaseFast
 cd zig-out/bin
-./Evolution 100000
+./Evolution 0

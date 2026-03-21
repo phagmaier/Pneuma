@@ -4,6 +4,14 @@ const Scheduler = @import("scheduler.zig").Scheduler;
 const Cpu = @import("cpu.zig").Cpu;
 
 pub fn main() !void {
+    const maxTicks: ?u32 = blk: {
+        var args = std.process.args();
+        _ = args.next();
+        const arg = args.next() orelse break :blk null;
+        const val = std.fmt.parseInt(u32, arg, 10) catch break :blk null;
+        break :blk if (val == 0) null else val;
+    };
+
     var da = std.heap.DebugAllocator(.{}){};
     const allocator = if (builtin.mode == .Debug)
         da.allocator()
@@ -35,7 +43,7 @@ pub fn main() !void {
     print("=== Pneuma started ===\n", .{});
 
     // Tick loop
-    while (scheduler.cpus.items.len > 0) {
+    while (scheduler.cpus.items.len > 0 and (maxTicks == null or scheduler.tick < maxTicks.?)) {
         try scheduler.doTick();
 
         // Log every 500 ticks
