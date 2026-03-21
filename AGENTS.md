@@ -14,9 +14,9 @@ Everything in the core simulation is functional and self-sustaining:
 - Soup: circular buffer, ownership map, claim/free, template search (ADRF/ADRB/SCAN)
 - CPU: 4 registers (expandable to 8), stack depth 8 (expandable to 64), push/pop, grow/shrink
 - All 34 opcodes dispatched in scheduler.execute()
-- Energy system: per-instruction costs, maintenance, death + scavenge, passive income
+- Energy system: per-instruction costs, maintenance, death + scavenge, passive income, harvest-fed reproduction reserve
 - Mutation system: point (1/2000), insertion (1/5000), deletion (1/5000) on COPY and PULL; cosmic rays every 3 ticks
-- Challenge system: epoch-based targets, HARVEST reward (600 energy), T_CHALLENGE timer (1500 ticks)
+- Challenge system: epoch-based targets, HARVEST reward split between survival energy and reproduction reserve, T_CHALLENGE timer (1500 ticks)
 - Tick loop: shuffle -> execute -> energy deduction -> death -> maintenance -> passive deposits -> cosmic ray -> challenge
 - Ancestor: 41-instruction self-replicator with ZERO+LOAD+HARVEST routine, loaded at 5 addresses with 3000 energy each
 - Logging: per-500-tick stats (pop, energy, size, births, deaths, harvests, reseeds), genome dump every 10K ticks
@@ -59,6 +59,12 @@ Recent experiments show:
   - Stage 2 is survivable
   - Harvest can persist past the `10k` boundary
   - But long runs still tend to compress into low-replication, aging lineages instead of sustaining a strong Red Queen dynamic
+- A new reproduction-coupled energy model works better than pure anti-coasting pressure:
+  - `HARVEST` now gives a modest survival top-up plus a separate reproduction reserve
+  - Writing into reserved child memory via `COPY` consumes reproduction reserve
+  - `DIVIDE` also requires reproduction reserve
+  - Passive inflow and age tax were restored to the gentler baseline while testing this
+  - Result: stage 2 remains active through `50k`, with replication still present and invariants intact, though the system still trends toward small-population plateaus instead of a strong arms race
 
 The current goal is to tune the ecology so that:
 - Computation remains relevant to harvest
@@ -73,13 +79,16 @@ Avoid Tierra's stagnation problem (equilibrium reached quickly, fitness landscap
 |-----------|-------|----------|
 | MAXENERGY | 10,000 | cpu.zig |
 | Starting energy (ancestor) | 3,000 | main.zig |
-| E_HARVEST | 600 | scheduler.zig |
-| Current E_HARVEST | 500 | scheduler.zig |
+| HARVEST survival reward | 150 | scheduler.zig |
+| HARVEST reproduction reserve | 384 | scheduler.zig |
 | T_CHALLENGE | 1,500 | scheduler.zig |
 | Baseline maintenance | 0/tick + age tax | cpu.maintenanceCost() |
 | Age tax | (age-8000)/500 after 8000 ticks | cpu.maintenanceCost() |
 | Passive deposits/tick | 10,000 | scheduler.doTick() |
 | Current passive deposits/tick | 5,000 | scheduler.doTick() |
+| Reproduction reserve max | 2,048 | cpu.zig |
+| COPY reserve cost into child | 1/write | scheduler.execute() |
+| DIVIDE reserve cost | 32 | scheduler.execute() |
 | DIVIDE cost | 5 | scheduler.execute() |
 | Point mutation rate | 1/2000 | cpu.mutate() |
 | Insertion rate | 1/5000 | cpu.mutate() |
@@ -130,8 +139,13 @@ LOAD — AX = mem[AX], read soup memory into register
 ## Current conclusions
 - The project is not doomed and the design is not inherently flawed
 - Energy plus challenge pressure is a viable direction, but the current ecology still allows eventual coasting/stagnation
-- Parameter tuning alone was not enough; structural challenge changes were necessary and helped
-- The next tuning axis is stronger anti-coasting pressure:
-  - lower passive inflow moderately
-  - increase late-life maintenance pressure
-  - keep the curated challenge ladder fixed while testing the energy economy
+- Parameter tuning alone was not enough; structural challenge and energy-flow changes were necessary and helped
+- The current best baseline is:
+  - curated challenge ladder fixed at `inc -> or1 -> shl+or1`
+  - ownership diagnostics clean (`orphan=0`, `frag=0`)
+  - harvest split into general survival energy plus reproduction reserve
+- This baseline is better than the previous anti-coasting pass:
+  - stage 2 remains replication-active through `50k`
+  - the system no longer cleanly collapses at the `10k` boundary
+  - but it still settles into small-population stage-2 plateaus rather than sustained escalating adaptation
+- The next tuning axis should focus on making stage progression and challenge complexity matter more, not just making starvation harsher

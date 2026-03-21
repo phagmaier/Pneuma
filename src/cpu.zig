@@ -4,6 +4,7 @@ const REGSIZE: u8 = 4;
 const STACKSIZE: u8 = 8;
 const ENERGY: u32 = 1000;
 pub const MAXENERGY: u32 = 10_000;
+pub const MAXREPROENERGY: u32 = 2048;
 const MAXPULL: u32 = 64;
 const MAXINJECT: u32 = 32;
 const INJECTCOST: u32 = 3;
@@ -47,6 +48,7 @@ pub const Cpu = struct {
     stackptr: u32,
     ip: u32,
     energy: u32,
+    reproEnergy: u32,
     age: u32,
     cost: u32,
     childStart: u32,
@@ -67,6 +69,7 @@ pub const Cpu = struct {
             .stackptr = 0,
             .ip = start,
             .energy = ENERGY,
+            .reproEnergy = 0,
             .age = 0,
             .cost = 0,
             .childStart = 0,
@@ -89,6 +92,7 @@ pub const Cpu = struct {
             .stackptr = 0,
             .ip = start,
             .energy = energy,
+            .reproEnergy = 0,
             .age = 0,
             .cost = 0,
             .childStart = 0,
@@ -242,7 +246,7 @@ pub const Cpu = struct {
         // Max age: organism dies after 10000 ticks without replicating
         // Replication resets age to 0, so active replicators are not affected
         if (self.age > 8000) {
-            maint += (self.age - 8000) / 300;
+            maint += (self.age - 8000) / 500;
         }
         return maint;
     }

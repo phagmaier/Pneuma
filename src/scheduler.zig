@@ -5,9 +5,13 @@ const cpu_mod = @import("cpu.zig");
 const Cpu = cpu_mod.Cpu;
 const SIZE = Soup.SIZE;
 const MAXENERGY = cpu_mod.MAXENERGY;
+const MAXREPROENERGY = cpu_mod.MAXREPROENERGY;
 const T_CHALLENGE: u32 = 1500;
-const E_HARVEST: u32 = 500;
-const PASSIVE_DEPOSITS: u32 = 4000;
+const E_HARVEST_SURVIVAL: u32 = 150;
+const E_HARVEST_REPRO: u32 = 384;
+const REPRO_COPY_COST: u32 = 1;
+const REPRO_DIVIDE_COST: u32 = 32;
+const PASSIVE_DEPOSITS: u32 = 5000;
 const EPOCH2_START: u32 = 10_000;
 const EPOCH3_START: u32 = 50_000;
 const CHALLENGE_ADDR: u32 = 0;
@@ -145,6 +149,15 @@ pub const Scheduler = struct {
         if (idx < cpu.registers.len) cpu.registers[idx] = val;
     }
 
+    fn inReservedChild(cpu: *const Cpu, addr: u32) bool {
+        if (cpu.childSize == 0) return false;
+        for (0..cpu.childSize) |i| {
+            const child_addr = Soup.wrap(cpu.childStart + @as(u32, @intCast(i)));
+            if (child_addr == addr) return true;
+        }
+        return false;
+    }
+
     pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, challengeTarget: u32, stats: *Stats) !bool {
         const AX: u8 = 0;
         const BX: u8 = 1;
@@ -225,8 +238,9 @@ pub const Scheduler = struct {
                 }
             },
             .div => {
-                if (cpu.childSize > 0) {
+                if (cpu.childSize > 0 and cpu.reproEnergy >= REPRO_DIVIDE_COST) {
                     cpu.cost = 5;
+                    cpu.reproEnergy -= REPRO_DIVIDE_COST;
                     cpu.inc(SIZE);
                     return true;
                 }
@@ -246,7 +260,8 @@ pub const Scheduler = struct {
             .merge => cpu.merge(soup.occupied, soup.scavenge),
             .harvest => {
                 if (cpu.registers[AX] == challengeTarget and !cpu.harvested) {
-                    cpu.energy = @min(cpu.energy + E_HARVEST, MAXENERGY);
+                    cpu.energy = @min(cpu.energy + E_HARVEST_SURVIVAL, MAXENERGY);
+                    cpu.reproEnergy = @min(cpu.reproEnergy + E_HARVEST_REPRO, MAXREPROENERGY);
                     cpu.harvested = true;
                     stats.harvests += 1;
                 }
@@ -300,10 +315,16 @@ pub const Scheduler = struct {
                 if (!mr.skip) {
                     var dst = Soup.wrap(cpu.registers[AX]);
                     if (mr.insert_before) |ins| {
-                        if (dst != 0) soup.mem[dst] = ins;
+                        if (dst != 0 and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
+                            if (inReservedChild(cpu, dst)) cpu.reproEnergy -= REPRO_COPY_COST;
+                            soup.mem[dst] = ins;
+                        }
                         dst = Soup.incWrap(dst);
                     }
-                    if (dst != 0) soup.mem[dst] = mr.value;
+                    if (dst != 0 and (!inReservedChild(cpu, dst) or cpu.reproEnergy >= REPRO_COPY_COST)) {
+                        if (inReservedChild(cpu, dst)) cpu.reproEnergy -= REPRO_COPY_COST;
+                        soup.mem[dst] = mr.value;
+                    }
                 }
             },
             .load => {
