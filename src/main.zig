@@ -75,7 +75,7 @@ pub fn main() !void {
             const s = &scheduler.stats;
             const diag = scheduler.diagnostics();
 
-            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} repl={d:<2} | births={d} deaths={d} harvests={d} reseeds={d} challenge={d}->{d} stage={d} recipe={d} own={d} reserved={d} orphan={d} frag={d}\n", .{
+            print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} ph={d:<2} repl={d:<2} | births={d} deaths={d} harvests={d} partials={d} reseeds={d} hTry={d} tgt={d} s2={d} s3={d} s4r={d} s4f={d} st={d} tw={d} challenge={d}->{d} stage={d} recipe={d} own={d} reserved={d} orphan={d} frag={d}\n", .{
                 scheduler.tick,
                 n,
                 avgE,
@@ -85,11 +85,21 @@ pub fn main() !void {
                 totalSize,
                 maxAge,
                 numHarvested,
+                s.partial_harvests,
                 numReplicating,
                 s.births,
                 s.deaths,
                 s.harvests,
+                s.partial_harvests,
                 s.reseeds,
+                s.harvest_attempts,
+                s.harvest_target_hits,
+                s.harvest_stage2_hits,
+                s.harvest_stage3_hits,
+                s.harvest_stage4_reg_hits,
+                s.harvest_stage4_full_hits,
+                s.store_ops,
+                s.trace_writes,
                 scheduler.challengeInput,
                 scheduler.challengeTarget,
                 scheduler.challengeStage,
@@ -147,6 +157,6 @@ pub fn main() !void {
     if (scheduler.cpus.items.len == 0) {
         print("All organisms dead at tick {d}\n", .{scheduler.tick});
     } else if (maxTicks) |limit| {
-        print("Stopped at tick {d} due to maxTicks={d}\n", .{scheduler.tick, limit});
+        print("Stopped at tick {d} due to maxTicks={d}\n", .{ scheduler.tick, limit });
     }
 }

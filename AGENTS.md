@@ -143,7 +143,7 @@ COPY — copies mem[BX] to mem[AX] with mutation
 LOAD — AX = mem[AX], read soup memory into register
 
 ### 0x22: Memory write
-STORE — mem[CX] = AX, currently only effective for reserved challenge scratch slots `1..3`
+STORE — writes `AX` into challenge trace slot `1 + min(CX, 2)`, so `CX=0/1/2` targets reserved slots `1/2/3`
 
 ## Conventions
 - All addresses wrap mod 131,072 — always use Soup.wrap()
@@ -192,13 +192,29 @@ STORE — mem[CX] = AX, currently only effective for reserved challenge scratch 
   - pre-stage-4 behavior is essentially unchanged from the prior transcript-only version
   - no lineage evolved meaningful use of the scratch-memory transcript by the `90k` boundary
   - stage 4 therefore remained survivable only through the same low-harvest, reseed-supported plateau dynamics, not through a new computational regime
+- A follow-up experiment made scratch-memory relevant earlier by:
+  - keeping the easier `STORE` mapping
+  - requiring `mem[1] == input` already at stage 3
+- That earlier-scratch branch underperformed the accepted baseline:
+  - `13k` stayed healthy, but longer runs regressed
+  - `50k` reached a tiny ancestor-like plateau with `harv=0`
+  - `100k` again finished alive but with stage 3/4 flatlined at `harv=0`, frequent reseed support, and no new adaptive regime
+  - conclusion: earlier scratch requirements made the slope steeper before evolution had a reliable path into memory-writing
 - Current recommendation:
   - keep the reproduction-coupled energy model and transcript-based harvest validation as the main baseline
   - do not adopt the `STORE`/scratch-transcript branch as the new default yet
-  - the next work should focus on evolvability, not just harder challenge checks
-  - likely options are:
-    - seed a more stage-3/4-capable ancestor so evolution has a reachable path into deeper computation
-    - or add a more evolvable memory-write/computation primitive before requiring scratch-memory transcripts
+  - do not adopt the earlier stage-3 scratch-witness branch either
+  - the next work should focus on evolvability gradients and observability, not just harder challenge checks
+  - immediate roadmap:
+    - restore stage 3 to transcript-only validation
+    - keep `STORE` available as an evolvable primitive
+    - add instrumentation for `HARVEST` attempts, witness-preservation hits, `STORE` use, and trace writes
+    - test graded rewards for partial stage-3/4 transcript success so near-miss computation is not completely invisible
+    - then compare against baseline at `13k`, `50k`, and `100k`
+  - medium-term roadmap:
+    - if graded rewards help, tune their magnitude to preserve pressure without turning partial solutions into a new equilibrium
+    - if graded rewards do not help, seed a minimally stage-3-capable ancestor on a separate branch
+    - only revisit mandatory scratch-memory transcripts after there is evidence that lineages are discovering and exploiting `STORE`
 
 ## Accepted baseline
 - Keep the current reproduction-coupled energy model unless a future experiment clearly outperforms it
@@ -211,3 +227,4 @@ STORE — mem[CX] = AX, currently only effective for reserved challenge scratch 
 - Baseline note:
   - the accepted baseline is still the transcript-validated harvest model without requiring scratch-memory transcript writes
   - the `STORE`/scratch-memory stage-4 branch is exploratory and did not outperform the accepted baseline
+  - the later earlier-scratch stage-3 experiment also did not outperform the accepted baseline and should not be treated as default

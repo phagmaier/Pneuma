@@ -9,6 +9,8 @@ const MAXREPROENERGY = cpu_mod.MAXREPROENERGY;
 const T_CHALLENGE: u32 = 1500;
 const E_HARVEST_SURVIVAL: u32 = 150;
 const E_HARVEST_REPRO: u32 = 384;
+const E_HARVEST_PARTIAL_SURVIVAL: u32 = 40;
+const E_HARVEST_PARTIAL_REPRO: u32 = 64;
 const REPRO_COPY_COST: u32 = 1;
 const REPRO_DIVIDE_COST: u32 = 32;
 const PASSIVE_DEPOSITS: u32 = 5000;
@@ -45,13 +47,31 @@ pub const Stats = struct {
     births: u32 = 0,
     deaths: u32 = 0,
     harvests: u32 = 0,
+    partial_harvests: u32 = 0,
     reseeds: u32 = 0,
+    harvest_attempts: u32 = 0,
+    harvest_target_hits: u32 = 0,
+    harvest_stage2_hits: u32 = 0,
+    harvest_stage3_hits: u32 = 0,
+    harvest_stage4_reg_hits: u32 = 0,
+    harvest_stage4_full_hits: u32 = 0,
+    store_ops: u32 = 0,
+    trace_writes: u32 = 0,
 
     pub fn reset(self: *Stats) void {
         self.births = 0;
         self.deaths = 0;
         self.harvests = 0;
+        self.partial_harvests = 0;
         self.reseeds = 0;
+        self.harvest_attempts = 0;
+        self.harvest_target_hits = 0;
+        self.harvest_stage2_hits = 0;
+        self.harvest_stage3_hits = 0;
+        self.harvest_stage4_reg_hits = 0;
+        self.harvest_stage4_full_hits = 0;
+        self.store_ops = 0;
+        self.trace_writes = 0;
     }
 };
 
@@ -134,18 +154,70 @@ pub const Scheduler = struct {
         witness2: u32,
     };
 
-    fn harvestSatisfied(cpu: *const Cpu, soup: *const Soup, check: HarvestCheck) bool {
-        if (reg(cpu, 0) != check.target) return false;
+    const HarvestOutcome = enum {
+        none,
+        partial,
+        full,
+    };
+
+    fn targetSatisfied(cpu: *const Cpu, check: HarvestCheck) bool {
+        return reg(cpu, 0) == check.target;
+    }
+
+    fn stage2Satisfied(cpu: *const Cpu, check: HarvestCheck) bool {
+        return targetSatisfied(cpu, check) and reg(cpu, 1) == check.input;
+    }
+
+    fn stage3Satisfied(cpu: *const Cpu, check: HarvestCheck) bool {
+        return stage2Satisfied(cpu, check) and reg(cpu, 2) == check.witness1;
+    }
+
+    fn stage4RegsSatisfied(cpu: *const Cpu, check: HarvestCheck) bool {
+        return targetSatisfied(cpu, check) and
+            reg(cpu, 1) == check.witness1 and
+            reg(cpu, 2) == check.witness2;
+    }
+
+    fn stage4ScratchSatisfied(soup: *const Soup, check: HarvestCheck) bool {
+        return soup.mem[CHALLENGE_TRACE0_ADDR] == check.input and
+            soup.mem[CHALLENGE_TRACE1_ADDR] == check.witness1 and
+            soup.mem[CHALLENGE_TRACE2_ADDR] == check.witness2;
+    }
+
+    fn harvestOutcome(cpu: *const Cpu, soup: *const Soup, check: HarvestCheck) HarvestOutcome {
         return switch (check.stage) {
-            1 => true,
-            2 => reg(cpu, 1) == check.input,
-            3 => reg(cpu, 1) == check.input and reg(cpu, 2) == check.witness1,
-            else => reg(cpu, 1) == check.witness1 and
-                reg(cpu, 2) == check.witness2 and
-                soup.mem[CHALLENGE_TRACE0_ADDR] == check.input and
-                soup.mem[CHALLENGE_TRACE1_ADDR] == check.witness1 and
-                soup.mem[CHALLENGE_TRACE2_ADDR] == check.witness2,
+            1 => if (targetSatisfied(cpu, check)) .full else .none,
+            2 => if (stage2Satisfied(cpu, check)) .full else .none,
+            3 => if (stage3Satisfied(cpu, check))
+                .full
+            else if (stage2Satisfied(cpu, check))
+                .partial
+            else
+                .none,
+            else => if (stage4RegsSatisfied(cpu, check) and stage4ScratchSatisfied(soup, check))
+                .full
+            else if (stage4RegsSatisfied(cpu, check))
+                .partial
+            else
+                .none,
         };
+    }
+
+    fn recordHarvestAttempt(stats: *Stats, cpu: *const Cpu, soup: *const Soup, check: HarvestCheck) void {
+        stats.harvest_attempts += 1;
+        if (!targetSatisfied(cpu, check)) return;
+        stats.harvest_target_hits += 1;
+        if (check.stage == 1) return;
+        if (!stage2Satisfied(cpu, check)) return;
+        stats.harvest_stage2_hits += 1;
+        if (check.stage == 2) return;
+        if (check.stage == 3) {
+            if (stage3Satisfied(cpu, check)) stats.harvest_stage3_hits += 1;
+            return;
+        }
+        if (!stage4RegsSatisfied(cpu, check)) return;
+        stats.harvest_stage4_reg_hits += 1;
+        if (stage4ScratchSatisfied(soup, check)) stats.harvest_stage4_full_hits += 1;
     }
 
     fn findCpuIndexById(self: *Scheduler, id: u32) ?usize {
@@ -293,11 +365,23 @@ pub const Scheduler = struct {
             .inject => cpu.inject(soup.mem),
             .merge => cpu.merge(soup.occupied, soup.scavenge),
             .harvest => {
-                if (harvestSatisfied(cpu, soup, check) and !cpu.harvested) {
-                    cpu.energy = @min(cpu.energy + E_HARVEST_SURVIVAL, MAXENERGY);
-                    cpu.reproEnergy = @min(cpu.reproEnergy + E_HARVEST_REPRO, MAXREPROENERGY);
-                    cpu.harvested = true;
-                    stats.harvests += 1;
+                recordHarvestAttempt(stats, cpu, soup, check);
+                if (!cpu.harvested) {
+                    switch (harvestOutcome(cpu, soup, check)) {
+                        .none => {},
+                        .partial => {
+                            cpu.energy = @min(cpu.energy + E_HARVEST_PARTIAL_SURVIVAL, MAXENERGY);
+                            cpu.reproEnergy = @min(cpu.reproEnergy + E_HARVEST_PARTIAL_REPRO, MAXREPROENERGY);
+                            cpu.harvested = true;
+                            stats.partial_harvests += 1;
+                        },
+                        .full => {
+                            cpu.energy = @min(cpu.energy + E_HARVEST_SURVIVAL, MAXENERGY);
+                            cpu.reproEnergy = @min(cpu.reproEnergy + E_HARVEST_REPRO, MAXREPROENERGY);
+                            cpu.harvested = true;
+                            stats.harvests += 1;
+                        },
+                    }
                 }
             },
             .extend => {
@@ -366,10 +450,12 @@ pub const Scheduler = struct {
                 cpu.registers[AX] = soup.mem[Soup.wrap(cpu.registers[AX])];
             },
             .store => {
-                const dst = Soup.wrap(reg(cpu, CX));
-                if (dst >= CHALLENGE_TRACE0_ADDR and dst <= CHALLENGE_TRACE2_ADDR) {
-                    soup.mem[dst] = reg(cpu, AX);
-                }
+                // STORE maps CX=0/1/2 onto the public trace slots 1/2/3 so
+                // a zeroed CPU can immediately write a useful witness.
+                const dst = CHALLENGE_TRACE0_ADDR + @min(reg(cpu, CX), 2);
+                stats.store_ops += 1;
+                soup.mem[dst] = reg(cpu, AX);
+                stats.trace_writes += 1;
             },
         }
         if (advance_ip) cpu.inc(SIZE);
@@ -590,53 +676,48 @@ pub const Scheduler = struct {
         // 44-instruction self-replicating ancestor with stage-2-ready harvest staging
         const program = [_]u32{
             // Start marker: nop1 nop1 nop0 nop0  (pos 0-3)
-            n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
+            n(.nop1),  n(.nop1),    n(.nop0),  n(.nop0),
             // Harvest: AX=0 → load challenge input → preserve input in BX → INC_A → harvest
-            n(.zero),
-            n(.load),
-            n(.pushA),
-            n(.popB),
-            n(.incA),
-            n(.harvest),
+            n(.zero),  n(.load),    n(.pushA), n(.popB),
+            n(.incA),  n(.harvest),
             // ADRB to find start marker
             n(.adrb),
             // Template: 1 1 0 0 (backward search matches start marker 1 1 0 0)
-            n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
+             n(.nop1),
+            n(.nop1),  n(.nop0),    n(.nop0),
             // Save start in stack, find end
-            n(.pushA),
+             n(.pushA),
             n(.adrf),
             // Template: 1 1 0 0 (forward complement search matches end marker 0 0 1 1)
-            n(.nop1),  n(.nop1),  n(.nop0),  n(.nop0),
+             n(.nop1),    n(.nop1),  n(.nop0),
+            n(.nop0),
             // BX=start, CX=length, allocate child
-            n(.popB),
-            n(.subAB),
-            n(.mal),
+             n(.popB),    n(.subAB), n(.mal),
             // Save child_start
             n(.pushA),
             // Copy loop marker: nop0 nop1
-            n(.nop0),  n(.nop1),
+            n(.nop0),    n(.nop1),
             // Copy loop body: restore AX, discard CALL return addr
-            n(.popA),
+             n(.popA),
             n(.popA),
             // Copy one instruction with mutation
-            n(.copy),
+             n(.copy),
             // Advance pointers
-            n(.incA),
-            n(.incB),
+               n(.incA),  n(.incB),
             n(.decC),
             // If CX!=0 skip DIVIDE
-            n(.ifCZ),
+             n(.ifCZ),
             // CX==0: spawn child
-            n(.div),
+               n(.div),
             // Save AX, find copy loop, jump back
-            n(.pushA),
+              n(.pushA),
             n(.adrb),
             // Template: 0 1 (backward search matches copy loop marker 0 1)
-            n(.nop0),  n(.nop1),
+             n(.nop0),    n(.nop1),
             // CALL jumps to copy loop
-            n(.call),
+             n(.call),
             // End marker: nop0 nop0 nop1 nop1
-            n(.nop0),  n(.nop0),  n(.nop1),  n(.nop1),
+            n(.nop0),  n(.nop0),    n(.nop1),  n(.nop1),
         };
 
         const size: u32 = program.len;
@@ -747,4 +828,112 @@ test "init" {
         scheduler.harvestCheck(),
         &scheduler.stats,
     );
+}
+
+test "store writes trace slot relative to CX" {
+    const expectEqual = std.testing.expectEqual;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(12345);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand);
+    defer scheduler.deinit();
+
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    var cpu = &scheduler.cpus.items[0];
+    scheduler.soup.mem[cpu.ip] = Op.toNum(.store);
+    cpu.registers[0] = 77;
+    cpu.registers[2] = 0;
+
+    _ = try Scheduler.execute(
+        scheduler.cpus.items,
+        cpu,
+        &scheduler.soup,
+        scheduler.allocator,
+        rand,
+        scheduler.harvestCheck(),
+        &scheduler.stats,
+    );
+    try expectEqual(@as(u32, 77), scheduler.soup.mem[CHALLENGE_TRACE0_ADDR]);
+
+    cpu.ip = cpu.start;
+    cpu.registers[0] = 99;
+    cpu.registers[2] = 2;
+    _ = try Scheduler.execute(
+        scheduler.cpus.items,
+        cpu,
+        &scheduler.soup,
+        scheduler.allocator,
+        rand,
+        scheduler.harvestCheck(),
+        &scheduler.stats,
+    );
+    try expectEqual(@as(u32, 99), scheduler.soup.mem[CHALLENGE_TRACE2_ADDR]);
+}
+
+test "harvest stage 3 accepts transcript without scratch witness" {
+    const expect = std.testing.expect;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(67890);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand);
+    defer scheduler.deinit();
+
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    var cpu = &scheduler.cpus.items[0];
+    cpu.registers[0] = 11;
+    cpu.registers[1] = 5;
+    cpu.registers[2] = 10;
+
+    scheduler.challengeStage = 3;
+    scheduler.challengeInput = 5;
+    scheduler.challengeTarget = 11;
+    scheduler.challengeWitness1 = 10;
+    scheduler.challengeWitness2 = 0;
+    const check = scheduler.harvestCheck();
+
+    try expect(Scheduler.harvestOutcome(cpu, &scheduler.soup, check) == .full);
+}
+
+test "harvest stage 4 grants partial reward without scratch transcript" {
+    const expect = std.testing.expect;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(24680);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand);
+    defer scheduler.deinit();
+
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    var cpu = &scheduler.cpus.items[0];
+    cpu.registers[0] = 11;
+    cpu.registers[1] = 10;
+    cpu.registers[2] = 11;
+
+    scheduler.challengeStage = 4;
+    scheduler.challengeInput = 5;
+    scheduler.challengeTarget = 11;
+    scheduler.challengeWitness1 = 10;
+    scheduler.challengeWitness2 = 11;
+
+    try expect(Scheduler.harvestOutcome(cpu, &scheduler.soup, scheduler.harvestCheck()) == .partial);
 }
