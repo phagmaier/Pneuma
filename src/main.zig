@@ -104,7 +104,8 @@ pub fn main() !void {
                             "n0", "n1", "or", "sh", "zr", "iz", "sb", "sc",
                             "ia", "ib", "dc", "pA", "oA", "oB", "oC", "af",
                             "ab", "ca", "rt", "mB", "mD", "ml", "dv", "sn",
-                            "pl", "ij", "mg", "hv", "ex", "sk", "rA", "aR", "cp", "ld",
+                            "pl", "ij", "mg", "hv", "ex", "sk", "rA", "aR",
+                            "cp", "ld",
                         };
                         print("{s} ", .{names[opVal]});
                     } else {

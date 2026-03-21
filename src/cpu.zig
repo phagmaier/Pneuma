@@ -144,7 +144,7 @@ pub const Cpu = struct {
     fn decCpus(id: u32, cpus: []Cpu) void {
         for (cpus) |*cpu| {
             if (cpu.id == id) {
-                cpu.energy -= 1;
+                cpu.energy -|= 1;
                 break;
             }
         }
