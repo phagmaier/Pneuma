@@ -12,6 +12,12 @@ const MERGECOST: u32 = 2;
 const EXTENDCOST: u32 = 50;
 const GROWSTACK: u32 = 8;
 
+pub const Lineage = enum(u8) {
+    default_ancestor,
+    stage3_immigrant,
+    stage4_immigrant,
+};
+
 pub const MutResult = struct {
     value: u32,
     insert_before: ?u32, // if set, write this random opcode before the value
@@ -54,8 +60,9 @@ pub const Cpu = struct {
     childStart: u32,
     childSize: u32,
     harvested: bool,
+    lineage: Lineage,
 
-    pub fn init(allocator: std.mem.Allocator, id: u32, start: u32, size: u32) !Cpu {
+    pub fn init(allocator: std.mem.Allocator, id: u32, start: u32, size: u32, lineage: Lineage) !Cpu {
         const registers = try allocator.alloc(u32, REGSIZE);
         @memset(registers, 0);
         const stack = try allocator.alloc(u32, STACKSIZE);
@@ -75,10 +82,11 @@ pub const Cpu = struct {
             .childStart = 0,
             .childSize = 0,
             .harvested = false,
+            .lineage = lineage,
         };
     }
 
-    pub fn initChild(allocator: std.mem.Allocator, id: u32, start: u32, size: u32, numRegs: usize, stackDepth: usize, energy: u32) !Cpu {
+    pub fn initChild(allocator: std.mem.Allocator, id: u32, start: u32, size: u32, numRegs: usize, stackDepth: usize, energy: u32, lineage: Lineage) !Cpu {
         const registers = try allocator.alloc(u32, numRegs);
         @memset(registers, 0);
         const stack = try allocator.alloc(u32, stackDepth);
@@ -98,6 +106,7 @@ pub const Cpu = struct {
             .childStart = 0,
             .childSize = 0,
             .harvested = false,
+            .lineage = lineage,
         };
     }
 

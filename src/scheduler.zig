@@ -3,6 +3,7 @@ const Op = @import("op.zig").Op;
 const Soup = @import("soup.zig").Soup;
 const cpu_mod = @import("cpu.zig");
 const Cpu = cpu_mod.Cpu;
+const Lineage = cpu_mod.Lineage;
 const SIZE = Soup.SIZE;
 const MAXENERGY = cpu_mod.MAXENERGY;
 const MAXREPROENERGY = cpu_mod.MAXREPROENERGY;
@@ -22,6 +23,24 @@ const CHALLENGE_TRACE0_ADDR: u32 = 1;
 const CHALLENGE_TRACE1_ADDR: u32 = 2;
 const CHALLENGE_TRACE2_ADDR: u32 = 3;
 const MAX_CHALLENGE_OPS: usize = 5;
+const MAX_HARVEST_EVENTS: usize = 8;
+
+pub const Stage4InjectionMode = enum {
+    on_stage4_transition,
+    at_tick,
+};
+
+pub const Stage4ReseedPolicy = enum {
+    stage3,
+    stage4,
+};
+
+pub const ExperimentConfig = struct {
+    stage4_injection_mode: Stage4InjectionMode = .on_stage4_transition,
+    stage4_injection_tick: u32 = EPOCH4_START,
+    stage4_immigrant_energy: u32 = 3000,
+    stage4_low_pop_reseed_policy: Stage4ReseedPolicy = .stage3,
+};
 
 const Challenge = struct {
     input: u32,
@@ -43,20 +62,60 @@ const ChallengeRecipe = struct {
     input_max: u32,
 };
 
+pub const HarvestOutcome = enum {
+    none,
+    partial,
+    full,
+};
+
+pub const HarvestEvent = struct {
+    tick: u32,
+    cpu_id: u32,
+    lineage: Lineage,
+    stage: u8,
+    outcome: HarvestOutcome,
+    age: u32,
+    size: u32,
+    energy: u32,
+    repro_energy: u32,
+    ax: u32,
+    bx: u32,
+    cx: u32,
+    trace0: u32,
+    trace1: u32,
+    trace2: u32,
+    input: u32,
+    target: u32,
+    witness1: u32,
+    witness2: u32,
+};
+
 pub const Stats = struct {
     births: u32 = 0,
     deaths: u32 = 0,
     harvests: u32 = 0,
     partial_harvests: u32 = 0,
     reseeds: u32 = 0,
+    low_pop_reseeds: u32 = 0,
+    stage3_immigrant_injections: u32 = 0,
+    stage4_immigrant_injections: u32 = 0,
     harvest_attempts: u32 = 0,
+    harvest_target_misses: u32 = 0,
     harvest_target_hits: u32 = 0,
+    harvest_stage2_misses: u32 = 0,
     harvest_stage2_hits: u32 = 0,
+    harvest_stage3_misses: u32 = 0,
     harvest_stage3_hits: u32 = 0,
+    harvest_stage4_reg_misses: u32 = 0,
     harvest_stage4_reg_hits: u32 = 0,
+    harvest_stage4_trace0_misses: u32 = 0,
+    harvest_stage4_trace1_misses: u32 = 0,
+    harvest_stage4_trace2_misses: u32 = 0,
     harvest_stage4_full_hits: u32 = 0,
     store_ops: u32 = 0,
     trace_writes: u32 = 0,
+    harvest_events: [MAX_HARVEST_EVENTS]?HarvestEvent = [_]?HarvestEvent{null} ** MAX_HARVEST_EVENTS,
+    harvest_event_count: u8 = 0,
 
     pub fn reset(self: *Stats) void {
         self.births = 0;
@@ -64,15 +123,39 @@ pub const Stats = struct {
         self.harvests = 0;
         self.partial_harvests = 0;
         self.reseeds = 0;
+        self.low_pop_reseeds = 0;
+        self.stage3_immigrant_injections = 0;
+        self.stage4_immigrant_injections = 0;
         self.harvest_attempts = 0;
+        self.harvest_target_misses = 0;
         self.harvest_target_hits = 0;
+        self.harvest_stage2_misses = 0;
         self.harvest_stage2_hits = 0;
+        self.harvest_stage3_misses = 0;
         self.harvest_stage3_hits = 0;
+        self.harvest_stage4_reg_misses = 0;
         self.harvest_stage4_reg_hits = 0;
+        self.harvest_stage4_trace0_misses = 0;
+        self.harvest_stage4_trace1_misses = 0;
+        self.harvest_stage4_trace2_misses = 0;
         self.harvest_stage4_full_hits = 0;
         self.store_ops = 0;
         self.trace_writes = 0;
+        self.harvest_events = [_]?HarvestEvent{null} ** MAX_HARVEST_EVENTS;
+        self.harvest_event_count = 0;
     }
+};
+
+pub const LineageCounts = struct {
+    default_ancestor: u32 = 0,
+    stage3_immigrant: u32 = 0,
+    stage4_immigrant: u32 = 0,
+};
+
+pub const LineageCensus = struct {
+    population: LineageCounts = .{},
+    harvested: LineageCounts = .{},
+    replicating: LineageCounts = .{},
 };
 
 pub const Diagnostics = struct {
@@ -98,8 +181,10 @@ pub const Scheduler = struct {
     cpus: std.ArrayList(Cpu),
     soup: Soup,
     stats: Stats,
+    config: ExperimentConfig,
+    stage4BridgeInjected: bool,
 
-    pub fn init(allocator: std.mem.Allocator, rand: std.Random) !Scheduler {
+    pub fn init(allocator: std.mem.Allocator, rand: std.Random, config: ExperimentConfig) !Scheduler {
         var sched = Scheduler{
             .tick = 0,
             .nextId = 0,
@@ -115,6 +200,8 @@ pub const Scheduler = struct {
             .cpus = std.ArrayList(Cpu).empty,
             .soup = try Soup.init(allocator),
             .stats = .{},
+            .config = config,
+            .stage4BridgeInjected = false,
         };
         sched.challengeStage = stageForTick(sched.tick);
         sched.challengeRecipe = generateRecipe(sched.challengeStage, rand);
@@ -135,12 +222,12 @@ pub const Scheduler = struct {
         self.soup.deinit(self.allocator);
     }
 
-    pub fn spawnOrganism(self: *Scheduler, start: u32, size: u32, energy: u32) !void {
+    pub fn spawnOrganism(self: *Scheduler, start: u32, size: u32, energy: u32, lineage: Lineage) !void {
         const region = self.soup.findFree(start, size, size) orelse return error.RegionOccupied;
         if (region != Soup.wrap(start)) return error.RegionOccupied;
         const id = self.nextId;
         self.nextId += 1;
-        var cpu = try Cpu.init(self.allocator, id, region, size);
+        var cpu = try Cpu.init(self.allocator, id, region, size, lineage);
         cpu.energy = energy;
         self.soup._claim(id, region, size);
         try self.cpus.append(self.allocator, cpu);
@@ -152,12 +239,6 @@ pub const Scheduler = struct {
         target: u32,
         witness1: u32,
         witness2: u32,
-    };
-
-    const HarvestOutcome = enum {
-        none,
-        partial,
-        full,
     };
 
     fn targetSatisfied(cpu: *const Cpu, check: HarvestCheck) bool {
@@ -203,21 +284,72 @@ pub const Scheduler = struct {
         };
     }
 
+    fn recordNoteworthyHarvestEvent(self: *Scheduler, cpu: *const Cpu, check: HarvestCheck, outcome: HarvestOutcome) void {
+        if (self.stats.harvest_event_count >= MAX_HARVEST_EVENTS) return;
+        const idx: usize = @intCast(self.stats.harvest_event_count);
+        self.stats.harvest_events[idx] = .{
+            .tick = self.tick,
+            .cpu_id = cpu.id,
+            .lineage = cpu.lineage,
+            .stage = check.stage,
+            .outcome = outcome,
+            .age = cpu.age,
+            .size = cpu.size,
+            .energy = cpu.energy,
+            .repro_energy = cpu.reproEnergy,
+            .ax = reg(cpu, 0),
+            .bx = reg(cpu, 1),
+            .cx = reg(cpu, 2),
+            .trace0 = self.soup.mem[CHALLENGE_TRACE0_ADDR],
+            .trace1 = self.soup.mem[CHALLENGE_TRACE1_ADDR],
+            .trace2 = self.soup.mem[CHALLENGE_TRACE2_ADDR],
+            .input = check.input,
+            .target = check.target,
+            .witness1 = check.witness1,
+            .witness2 = check.witness2,
+        };
+        self.stats.harvest_event_count += 1;
+    }
+
     fn recordHarvestAttempt(stats: *Stats, cpu: *const Cpu, soup: *const Soup, check: HarvestCheck) void {
         stats.harvest_attempts += 1;
-        if (!targetSatisfied(cpu, check)) return;
-        stats.harvest_target_hits += 1;
-        if (check.stage == 1) return;
-        if (!stage2Satisfied(cpu, check)) return;
-        stats.harvest_stage2_hits += 1;
-        if (check.stage == 2) return;
-        if (check.stage == 3) {
-            if (stage3Satisfied(cpu, check)) stats.harvest_stage3_hits += 1;
+        if (!targetSatisfied(cpu, check)) {
+            stats.harvest_target_misses += 1;
             return;
         }
-        if (!stage4RegsSatisfied(cpu, check)) return;
-        stats.harvest_stage4_reg_hits += 1;
-        if (stage4ScratchSatisfied(soup, check)) stats.harvest_stage4_full_hits += 1;
+        stats.harvest_target_hits += 1;
+        switch (check.stage) {
+            1 => {},
+            2 => {
+                if (!stage2Satisfied(cpu, check)) {
+                    stats.harvest_stage2_misses += 1;
+                    return;
+                }
+                stats.harvest_stage2_hits += 1;
+            },
+            3 => {
+                if (!stage2Satisfied(cpu, check)) {
+                    stats.harvest_stage2_misses += 1;
+                    return;
+                }
+                stats.harvest_stage2_hits += 1;
+                if (stage3Satisfied(cpu, check))
+                    stats.harvest_stage3_hits += 1
+                else
+                    stats.harvest_stage3_misses += 1;
+            },
+            else => {
+                if (!stage4RegsSatisfied(cpu, check)) {
+                    stats.harvest_stage4_reg_misses += 1;
+                    return;
+                }
+                stats.harvest_stage4_reg_hits += 1;
+                if (soup.mem[CHALLENGE_TRACE0_ADDR] != check.input) stats.harvest_stage4_trace0_misses += 1;
+                if (soup.mem[CHALLENGE_TRACE1_ADDR] != check.witness1) stats.harvest_stage4_trace1_misses += 1;
+                if (soup.mem[CHALLENGE_TRACE2_ADDR] != check.witness2) stats.harvest_stage4_trace2_misses += 1;
+                if (stage4ScratchSatisfied(soup, check)) stats.harvest_stage4_full_hits += 1;
+            },
+        }
     }
 
     fn findCpuIndexById(self: *Scheduler, id: u32) ?usize {
@@ -264,7 +396,7 @@ pub const Scheduler = struct {
         return false;
     }
 
-    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, check: HarvestCheck, stats: *Stats) !bool {
+    pub fn execute(cpus: []Cpu, cpu: *Cpu, soup: *Soup, allocator: std.mem.Allocator, rand: std.Random, check: HarvestCheck, stats: *Stats) !HarvestOutcome {
         const AX: u8 = 0;
         const BX: u8 = 1;
         const CX: u8 = 2;
@@ -272,7 +404,7 @@ pub const Scheduler = struct {
         cpu.cost = 1;
         if (cpu.registers.len == 0) {
             cpu.inc(SIZE);
-            return false;
+            return .none;
         }
         var advance_ip = true;
         const op = getOp(cpu.ip, soup);
@@ -348,7 +480,7 @@ pub const Scheduler = struct {
                     cpu.cost = 5;
                     cpu.reproEnergy -= REPRO_DIVIDE_COST;
                     cpu.inc(SIZE);
-                    return true;
+                    return .none;
                 }
             },
 
@@ -367,7 +499,8 @@ pub const Scheduler = struct {
             .harvest => {
                 recordHarvestAttempt(stats, cpu, soup, check);
                 if (!cpu.harvested) {
-                    switch (harvestOutcome(cpu, soup, check)) {
+                    const outcome = harvestOutcome(cpu, soup, check);
+                    switch (outcome) {
                         .none => {},
                         .partial => {
                             cpu.energy = @min(cpu.energy + E_HARVEST_PARTIAL_SURVIVAL, MAXENERGY);
@@ -382,6 +515,7 @@ pub const Scheduler = struct {
                             stats.harvests += 1;
                         },
                     }
+                    if (outcome != .none) return outcome;
                 }
             },
             .extend => {
@@ -416,13 +550,13 @@ pub const Scheduler = struct {
 
             .movRA => {
                 const size = @as(u32, @intCast(cpu.registers.len));
-                if (size == 0) return false;
+                if (size == 0) return .none;
                 const idx = @mod(reg(cpu, CX), size);
                 cpu.registers[AX] = cpu.registers[idx];
             },
             .movAR => {
                 const size = @as(u32, @intCast(cpu.registers.len));
-                if (size == 0) return false;
+                if (size == 0) return .none;
                 const idx = @mod(reg(cpu, CX), size);
                 cpu.registers[idx] = cpu.registers[AX];
             },
@@ -459,7 +593,7 @@ pub const Scheduler = struct {
             },
         }
         if (advance_ip) cpu.inc(SIZE);
-        return false;
+        return .none;
     }
 
     fn kill(self: *Scheduler, idx: usize) void {
@@ -511,6 +645,7 @@ pub const Scheduler = struct {
             parent.registers.len,
             parent.stack.len,
             childEnergy,
+            parent.lineage,
         );
         try newborns.append(self.allocator, child);
 
@@ -554,6 +689,24 @@ pub const Scheduler = struct {
         return diag;
     }
 
+    fn bumpLineage(counts: *LineageCounts, lineage: Lineage) void {
+        switch (lineage) {
+            .default_ancestor => counts.default_ancestor += 1,
+            .stage3_immigrant => counts.stage3_immigrant += 1,
+            .stage4_immigrant => counts.stage4_immigrant += 1,
+        }
+    }
+
+    pub fn lineageCensus(self: *const Scheduler) LineageCensus {
+        var census = LineageCensus{};
+        for (self.cpus.items) |cpu| {
+            bumpLineage(&census.population, cpu.lineage);
+            if (cpu.harvested) bumpLineage(&census.harvested, cpu.lineage);
+            if (cpu.childSize > 0) bumpLineage(&census.replicating, cpu.lineage);
+        }
+        return census;
+    }
+
     pub fn challengeRecipeCode(self: *const Scheduler) u32 {
         var code: u32 = 0;
         for (0..self.challengeRecipe.count) |i| {
@@ -586,12 +739,18 @@ pub const Scheduler = struct {
             var cpu = &self.cpus.items[i];
 
             // 2. Execute 1 instruction (sets cpu.cost)
-            const divHappened = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, self.harvestCheck(), &self.stats);
+            const check = self.harvestCheck();
+            const outcome = try execute(self.cpus.items, cpu, &self.soup, self.allocator, self.rand, check, &self.stats);
             const current_idx = self.cullZeroEnergy(current_id) orelse continue;
             cpu = &self.cpus.items[current_idx];
+            if ((check.stage == 3 and outcome == .full) or
+                (check.stage == 4 and outcome != .none))
+            {
+                self.recordNoteworthyHarvestEvent(cpu, check, outcome);
+            }
 
             // Handle DIVIDE — spawn child before energy deduction
-            if (divHappened) {
+            if (cpu.cost == 5 and cpu.childSize > 0) {
                 try self.spawnChild(cpu, &newborns);
             }
 
@@ -646,10 +805,11 @@ pub const Scheduler = struct {
             if (stage != self.challengeStage) {
                 self.challengeStage = stage;
                 self.challengeRecipe = generateRecipe(stage, self.rand);
-                if (stage >= 3) {
+                if (stage == 3) {
                     const addr = self.rand.intRangeLessThan(u32, 1, SIZE);
                     self.loadStage3Ancestor(addr, 3000) catch {};
                     self.stats.reseeds += 1;
+                    self.stats.stage3_immigrant_injections += 1;
                 }
             }
             const challenge = generateChallenge(self.challengeRecipe, self.rand);
@@ -666,18 +826,40 @@ pub const Scheduler = struct {
             }
         }
 
+        self.maybeInjectStage4Bridge();
+
         // 10. Re-seed if population is low (every 2000 ticks)
         if (@mod(self.tick, 2000) == 0 and self.cpus.items.len < 10) {
             const addr = self.rand.intRangeLessThan(u32, 1, SIZE);
-            if (self.challengeStage >= 3) {
+            if (self.challengeStage >= 4 and self.config.stage4_low_pop_reseed_policy == .stage4) {
+                self.loadStage4Ancestor(addr, self.config.stage4_immigrant_energy) catch {};
+            } else if (self.challengeStage >= 3) {
                 self.loadStage3Ancestor(addr, 3000) catch {};
             } else {
                 self.loadAncestor(addr, 3000) catch {};
             }
             self.stats.reseeds += 1;
+            self.stats.low_pop_reseeds += 1;
         }
 
         self.tick += 1;
+    }
+
+    fn shouldInjectStage4Bridge(self: *const Scheduler) bool {
+        if (self.stage4BridgeInjected) return false;
+        return switch (self.config.stage4_injection_mode) {
+            .on_stage4_transition => self.challengeStage >= 4,
+            .at_tick => self.tick >= self.config.stage4_injection_tick,
+        };
+    }
+
+    fn maybeInjectStage4Bridge(self: *Scheduler) void {
+        if (!self.shouldInjectStage4Bridge()) return;
+        const addr = self.rand.intRangeLessThan(u32, 1, SIZE);
+        self.loadStage4Ancestor(addr, self.config.stage4_immigrant_energy) catch return;
+        self.stage4BridgeInjected = true;
+        self.stats.reseeds += 1;
+        self.stats.stage4_immigrant_injections += 1;
     }
 
     pub fn loadAncestor(self: *Scheduler, addr: u32, energy: u32) !void {
@@ -737,7 +919,7 @@ pub const Scheduler = struct {
             self.soup.mem[idx] = inst;
         }
         // Spawn organism at this address
-        try self.spawnOrganism(start, size, energy);
+        try self.spawnOrganism(start, size, energy, .default_ancestor);
     }
 
     pub fn loadStage3Ancestor(self: *Scheduler, addr: u32, energy: u32) !void {
@@ -792,7 +974,38 @@ pub const Scheduler = struct {
             const idx = Soup.wrap(start + @as(u32, @intCast(i)));
             self.soup.mem[idx] = inst;
         }
-        try self.spawnOrganism(start, size, energy);
+        try self.spawnOrganism(start, size, energy, .stage3_immigrant);
+    }
+
+    pub fn loadStage4Ancestor(self: *Scheduler, addr: u32, energy: u32) !void {
+        const n = Op.toNum;
+        // 64-instruction self-replicator with explicit stage-4 scratch transcript production.
+        const program = [_]u32{
+            n(.nop1),  n(.nop1),    n(.nop0),  n(.nop0),
+            n(.zero),  n(.load),    n(.store), n(.pushA),
+            n(.popB),  n(.shl),     n(.pushA), n(.popB),
+            n(.zero),  n(.incA),    n(.pushA), n(.popC),
+            n(.movAB), n(.store),   n(.zero),  n(.incA),
+            n(.incA),  n(.pushA),   n(.popC),  n(.movAB),
+            n(.incA),  n(.store),   n(.pushA), n(.popC),
+            n(.or1),   n(.harvest), n(.adrb),  n(.nop1),
+            n(.nop1),  n(.nop0),    n(.nop0),  n(.pushA),
+            n(.adrf),  n(.nop1),    n(.nop1),  n(.nop0),
+            n(.nop0),  n(.popB),    n(.subAB), n(.mal),
+            n(.pushA), n(.nop0),    n(.nop1),  n(.popA),
+            n(.popA),  n(.copy),    n(.incA),  n(.incB),
+            n(.decC),  n(.ifCZ),    n(.div),   n(.pushA),
+            n(.adrb),  n(.nop0),    n(.nop1),  n(.call),
+            n(.nop0),  n(.nop0),    n(.nop1),  n(.nop1),
+        };
+
+        const size: u32 = program.len;
+        const start = self.soup.findFree(addr, size, SIZE - 1) orelse return error.NoSpaceForAncestor;
+        for (program, 0..) |inst, i| {
+            const idx = Soup.wrap(start + @as(u32, @intCast(i)));
+            self.soup.mem[idx] = inst;
+        }
+        try self.spawnOrganism(start, size, energy, .stage4_immigrant);
     }
 };
 
@@ -880,9 +1093,9 @@ test "init" {
         break :blk seed;
     });
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand);
+    var scheduler = try Scheduler.init(allocator, rand, .{});
     defer scheduler.deinit();
-    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 10, 1000);
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 10, 1000, .default_ancestor);
     _ = try Scheduler.execute(
         scheduler.cpus.items,
         &scheduler.cpus.items[0],
@@ -906,10 +1119,10 @@ test "store writes trace slot relative to CX" {
 
     var prng: std.Random.DefaultPrng = .init(12345);
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand);
+    var scheduler = try Scheduler.init(allocator, rand, .{});
     defer scheduler.deinit();
 
-    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000, .default_ancestor);
     var cpu = &scheduler.cpus.items[0];
     scheduler.soup.mem[cpu.ip] = Op.toNum(.store);
     cpu.registers[0] = 77;
@@ -953,10 +1166,10 @@ test "harvest stage 3 accepts transcript without scratch witness" {
 
     var prng: std.Random.DefaultPrng = .init(67890);
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand);
+    var scheduler = try Scheduler.init(allocator, rand, .{});
     defer scheduler.deinit();
 
-    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000, .default_ancestor);
     var cpu = &scheduler.cpus.items[0];
     cpu.registers[0] = 11;
     cpu.registers[1] = 5;
@@ -984,10 +1197,10 @@ test "harvest stage 4 grants partial reward without scratch transcript" {
 
     var prng: std.Random.DefaultPrng = .init(24680);
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand);
+    var scheduler = try Scheduler.init(allocator, rand, .{});
     defer scheduler.deinit();
 
-    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000);
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000, .default_ancestor);
     var cpu = &scheduler.cpus.items[0];
     cpu.registers[0] = 11;
     cpu.registers[1] = 10;
@@ -1000,4 +1213,92 @@ test "harvest stage 4 grants partial reward without scratch transcript" {
     scheduler.challengeWitness2 = 11;
 
     try expect(Scheduler.harvestOutcome(cpu, &scheduler.soup, scheduler.harvestCheck()) == .partial);
+}
+
+test "stage 4 accounting records register hits and scratch misses" {
+    const expectEqual = std.testing.expectEqual;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(13579);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand, .{});
+    defer scheduler.deinit();
+
+    try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000, .default_ancestor);
+    const cpu = &scheduler.cpus.items[0];
+    cpu.registers[0] = 5;
+    cpu.registers[1] = 4;
+    cpu.registers[2] = 5;
+
+    scheduler.challengeStage = 4;
+    scheduler.challengeInput = 2;
+    scheduler.challengeTarget = 5;
+    scheduler.challengeWitness1 = 4;
+    scheduler.challengeWitness2 = 5;
+    scheduler.soup.mem[CHALLENGE_TRACE0_ADDR] = 2;
+    scheduler.soup.mem[CHALLENGE_TRACE1_ADDR] = 0;
+    scheduler.soup.mem[CHALLENGE_TRACE2_ADDR] = 5;
+
+    Scheduler.recordHarvestAttempt(&scheduler.stats, cpu, &scheduler.soup, scheduler.harvestCheck());
+
+    try expectEqual(@as(u32, 1), scheduler.stats.harvest_target_hits);
+    try expectEqual(@as(u32, 1), scheduler.stats.harvest_stage4_reg_hits);
+    try expectEqual(@as(u32, 0), scheduler.stats.harvest_stage4_full_hits);
+    try expectEqual(@as(u32, 0), scheduler.stats.harvest_stage4_trace0_misses);
+    try expectEqual(@as(u32, 1), scheduler.stats.harvest_stage4_trace1_misses);
+    try expectEqual(@as(u32, 0), scheduler.stats.harvest_stage4_trace2_misses);
+}
+
+test "stage 4 bridge injection can be driven by absolute tick" {
+    const expect = std.testing.expect;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(112233);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand, .{
+        .stage4_injection_mode = .at_tick,
+        .stage4_injection_tick = 42,
+    });
+    defer scheduler.deinit();
+
+    try expect(!scheduler.shouldInjectStage4Bridge());
+    scheduler.tick = 41;
+    try expect(!scheduler.shouldInjectStage4Bridge());
+    scheduler.tick = 42;
+    try expect(scheduler.shouldInjectStage4Bridge());
+    scheduler.stage4BridgeInjected = true;
+    try expect(!scheduler.shouldInjectStage4Bridge());
+}
+
+test "stage 4 transition injection waits for stage 4 challenge" {
+    const expect = std.testing.expect;
+
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = gpa.allocator();
+    defer {
+        const deinit_status = gpa.deinit();
+        if (deinit_status == .leak) std.testing.expect(false) catch @panic("TEST FAIL");
+    }
+
+    var prng: std.Random.DefaultPrng = .init(445566);
+    const rand = prng.random();
+    var scheduler = try Scheduler.init(allocator, rand, .{});
+    defer scheduler.deinit();
+
+    scheduler.challengeStage = 3;
+    try expect(!scheduler.shouldInjectStage4Bridge());
+    scheduler.challengeStage = 4;
+    try expect(scheduler.shouldInjectStage4Bridge());
 }
