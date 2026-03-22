@@ -57,7 +57,7 @@ classify_verdict() {
   echo "pre_stage4"
 }
 
-echo -e "file\trequested_ticks\tseed\tinject\tenergy\treseed_policy\tstatus\tend_tick\tsurvived_90k\tverdict\tfinal_pop\tfinal_stage\tfinal_lineages\tfinal_harv\tfinal_ph\tfinal_reseeds\tfinal_i4\tfinal_s4r\tfinal_s4f\tstage4_full_events\tstage4_partial_events\tfirst_stage4_tick\tlast_stage4_tick"
+echo -e "file\trequested_ticks\tseed\tinject\tenergy\treseed_policy\tstatus\tend_tick\tsurvived_90k\tverdict\tfinal_pop\tfinal_stage\tfinal_lineages\tfinal_harv\tfinal_ph\tfinal_reseeds\tfinal_i4\tfinal_s4r\tfinal_s4f\tstage4_full_events\tstage4_partial_events\tfirst_stage4_tick\tlast_stage4_tick\tdflt_s4_part\tstg3_s4_part\tstg4_s4_part\tdflt_s4_full\tstg3_s4_full\tstg4_s4_full\tdflt_first_s4_part\tstg3_first_s4_part\tstg4_first_s4_part\tdflt_first_s4_full\tstg3_first_s4_full\tstg4_first_s4_full"
 
 for log in "$@"; do
   [ -e "$log" ] || continue
@@ -78,6 +78,18 @@ for log in "$@"; do
   stage4_partial_count="$(grep -Ec '^  event .* stage=4 out=part ' "$log" || true)"
   first_stage4_tick="$(sed -n 's/^  event t=\([0-9]\+\).* stage=4 .*/\1/p' "$log" | head -n1)"
   last_stage4_tick="$(sed -n 's/^  event t=\([0-9]\+\).* stage=4 .*/\1/p' "$log" | tail -n1)"
+  dflt_s4_part="$(grep -Ec '^  event t=[0-9]+ .* lin=dflt stage=4 out=part ' "$log" || true)"
+  stg3_s4_part="$(grep -Ec '^  event t=[0-9]+ .* lin=stg3 stage=4 out=part ' "$log" || true)"
+  stg4_s4_part="$(grep -Ec '^  event t=[0-9]+ .* lin=stg4 stage=4 out=part ' "$log" || true)"
+  dflt_s4_full="$(grep -Ec '^  event t=[0-9]+ .* lin=dflt stage=4 out=full ' "$log" || true)"
+  stg3_s4_full="$(grep -Ec '^  event t=[0-9]+ .* lin=stg3 stage=4 out=full ' "$log" || true)"
+  stg4_s4_full="$(grep -Ec '^  event t=[0-9]+ .* lin=stg4 stage=4 out=full ' "$log" || true)"
+  dflt_first_s4_part="$(sed -n 's/^  event t=\([0-9]\+\).* lin=dflt stage=4 out=part .*/\1/p' "$log" | head -n1)"
+  stg3_first_s4_part="$(sed -n 's/^  event t=\([0-9]\+\).* lin=stg3 stage=4 out=part .*/\1/p' "$log" | head -n1)"
+  stg4_first_s4_part="$(sed -n 's/^  event t=\([0-9]\+\).* lin=stg4 stage=4 out=part .*/\1/p' "$log" | head -n1)"
+  dflt_first_s4_full="$(sed -n 's/^  event t=\([0-9]\+\).* lin=dflt stage=4 out=full .*/\1/p' "$log" | head -n1)"
+  stg3_first_s4_full="$(sed -n 's/^  event t=\([0-9]\+\).* lin=stg3 stage=4 out=full .*/\1/p' "$log" | head -n1)"
+  stg4_first_s4_full="$(sed -n 's/^  event t=\([0-9]\+\).* lin=stg4 stage=4 out=full .*/\1/p' "$log" | head -n1)"
 
   seed="$(extract_field "$start_line" 's/^=== Pneuma started seed=\([^ ]*\) .*/\1/p')"
   inject="$(extract_field "$start_line" 's/^=== Pneuma started .* stage4_inject=\([^ ]*\) .*/\1/p')"
@@ -115,6 +127,14 @@ for log in "$@"; do
     first_stage4_tick="-"
     last_stage4_tick="-"
   fi
+  for first_tick_var in \
+    dflt_first_s4_part stg3_first_s4_part stg4_first_s4_part \
+    dflt_first_s4_full stg3_first_s4_full stg4_first_s4_full
+  do
+    if [ -z "${!first_tick_var}" ]; then
+      printf -v "$first_tick_var" '%s' "-"
+    fi
+  done
 
-  echo -e "${log}\t${requested_ticks}\t${seed}\t${inject}\t${energy}\t${reseed_policy}\t${status}\t${end_tick}\t${survived_90k}\t${verdict}\t${final_pop}\t${final_stage}\t${final_lineages}\t${final_harv}\t${final_ph}\t${final_reseeds}\t${final_i4}\t${final_s4r}\t${final_s4f}\t${stage4_full_count}\t${stage4_partial_count}\t${first_stage4_tick}\t${last_stage4_tick}"
+  echo -e "${log}\t${requested_ticks}\t${seed}\t${inject}\t${energy}\t${reseed_policy}\t${status}\t${end_tick}\t${survived_90k}\t${verdict}\t${final_pop}\t${final_stage}\t${final_lineages}\t${final_harv}\t${final_ph}\t${final_reseeds}\t${final_i4}\t${final_s4r}\t${final_s4f}\t${stage4_full_count}\t${stage4_partial_count}\t${first_stage4_tick}\t${last_stage4_tick}\t${dflt_s4_part}\t${stg3_s4_part}\t${stg4_s4_part}\t${dflt_s4_full}\t${stg3_s4_full}\t${stg4_s4_full}\t${dflt_first_s4_part}\t${stg3_first_s4_part}\t${stg4_first_s4_part}\t${dflt_first_s4_full}\t${stg3_first_s4_full}\t${stg4_first_s4_full}"
 done

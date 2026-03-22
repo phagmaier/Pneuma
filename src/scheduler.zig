@@ -36,10 +36,10 @@ pub const Stage4ReseedPolicy = enum {
 };
 
 pub const ExperimentConfig = struct {
-    stage4_injection_mode: Stage4InjectionMode = .on_stage4_transition,
-    stage4_injection_tick: u32 = EPOCH4_START,
+    stage4_injection_mode: Stage4InjectionMode = .at_tick,
+    stage4_injection_tick: u32 = 93_000,
     stage4_immigrant_energy: u32 = 3000,
-    stage4_low_pop_reseed_policy: Stage4ReseedPolicy = .stage3,
+    stage4_low_pop_reseed_policy: Stage4ReseedPolicy = .stage4,
 };
 
 const Challenge = struct {
@@ -158,6 +158,19 @@ pub const LineageCensus = struct {
     replicating: LineageCounts = .{},
 };
 
+pub const LineageFirstTicks = struct {
+    default_ancestor: ?u32 = null,
+    stage3_immigrant: ?u32 = null,
+    stage4_immigrant: ?u32 = null,
+};
+
+pub const Stage4LineageReport = struct {
+    partials: LineageCounts = .{},
+    fulls: LineageCounts = .{},
+    first_partial_tick: LineageFirstTicks = .{},
+    first_full_tick: LineageFirstTicks = .{},
+};
+
 pub const Diagnostics = struct {
     owned_cells: u32 = 0,
     contiguous_cells: u32 = 0,
@@ -181,6 +194,7 @@ pub const Scheduler = struct {
     cpus: std.ArrayList(Cpu),
     soup: Soup,
     stats: Stats,
+    stage4_lineage_report: Stage4LineageReport,
     config: ExperimentConfig,
     stage4BridgeInjected: bool,
 
@@ -200,6 +214,7 @@ pub const Scheduler = struct {
             .cpus = std.ArrayList(Cpu).empty,
             .soup = try Soup.init(allocator),
             .stats = .{},
+            .stage4_lineage_report = .{},
             .config = config,
             .stage4BridgeInjected = false,
         };
@@ -697,6 +712,38 @@ pub const Scheduler = struct {
         }
     }
 
+    fn noteFirstLineageTick(first_ticks: *LineageFirstTicks, lineage: Lineage, tick: u32) void {
+        switch (lineage) {
+            .default_ancestor => {
+                if (first_ticks.default_ancestor == null) first_ticks.default_ancestor = tick;
+            },
+            .stage3_immigrant => {
+                if (first_ticks.stage3_immigrant == null) first_ticks.stage3_immigrant = tick;
+            },
+            .stage4_immigrant => {
+                if (first_ticks.stage4_immigrant == null) first_ticks.stage4_immigrant = tick;
+            },
+        }
+    }
+
+    fn recordStage4LineageOutcome(self: *Scheduler, lineage: Lineage, outcome: HarvestOutcome) void {
+        switch (outcome) {
+            .none => {},
+            .partial => {
+                bumpLineage(&self.stage4_lineage_report.partials, lineage);
+                noteFirstLineageTick(&self.stage4_lineage_report.first_partial_tick, lineage, self.tick);
+            },
+            .full => {
+                bumpLineage(&self.stage4_lineage_report.fulls, lineage);
+                noteFirstLineageTick(&self.stage4_lineage_report.first_full_tick, lineage, self.tick);
+            },
+        }
+    }
+
+    pub fn stage4LineageReport(self: *const Scheduler) Stage4LineageReport {
+        return self.stage4_lineage_report;
+    }
+
     pub fn lineageCensus(self: *const Scheduler) LineageCensus {
         var census = LineageCensus{};
         for (self.cpus.items) |cpu| {
@@ -747,6 +794,9 @@ pub const Scheduler = struct {
                 (check.stage == 4 and outcome != .none))
             {
                 self.recordNoteworthyHarvestEvent(cpu, check, outcome);
+            }
+            if (check.stage == 4 and outcome != .none) {
+                self.recordStage4LineageOutcome(cpu.lineage, outcome);
             }
 
             // Handle DIVIDE — spawn child before energy deduction
@@ -1093,7 +1143,11 @@ test "init" {
         break :blk seed;
     });
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand, .{});
+    var scheduler = try Scheduler.init(allocator, rand, .{
+        .stage4_injection_mode = .on_stage4_transition,
+        .stage4_injection_tick = EPOCH4_START,
+        .stage4_low_pop_reseed_policy = .stage3,
+    });
     defer scheduler.deinit();
     try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 10, 1000, .default_ancestor);
     _ = try Scheduler.execute(
@@ -1119,7 +1173,11 @@ test "store writes trace slot relative to CX" {
 
     var prng: std.Random.DefaultPrng = .init(12345);
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand, .{});
+    var scheduler = try Scheduler.init(allocator, rand, .{
+        .stage4_injection_mode = .on_stage4_transition,
+        .stage4_injection_tick = EPOCH4_START,
+        .stage4_low_pop_reseed_policy = .stage3,
+    });
     defer scheduler.deinit();
 
     try scheduler.spawnOrganism(Soup.RESERVED_PREFIX_LEN, 1, 1000, .default_ancestor);
@@ -1294,7 +1352,11 @@ test "stage 4 transition injection waits for stage 4 challenge" {
 
     var prng: std.Random.DefaultPrng = .init(445566);
     const rand = prng.random();
-    var scheduler = try Scheduler.init(allocator, rand, .{});
+    var scheduler = try Scheduler.init(allocator, rand, .{
+        .stage4_injection_mode = .on_stage4_transition,
+        .stage4_injection_tick = EPOCH4_START,
+        .stage4_low_pop_reseed_policy = .stage3,
+    });
     defer scheduler.deinit();
 
     scheduler.challengeStage = 3;

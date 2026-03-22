@@ -5,6 +5,8 @@ const HarvestOutcome = @import("scheduler.zig").HarvestOutcome;
 const ExperimentConfig = @import("scheduler.zig").ExperimentConfig;
 const Stage4InjectionMode = @import("scheduler.zig").Stage4InjectionMode;
 const Stage4ReseedPolicy = @import("scheduler.zig").Stage4ReseedPolicy;
+const LineageCounts = @import("scheduler.zig").LineageCounts;
+const LineageFirstTicks = @import("scheduler.zig").LineageFirstTicks;
 const Lineage = @import("cpu.zig").Lineage;
 
 fn lineageLabel(lineage: Lineage) []const u8 {
@@ -36,6 +38,37 @@ fn reseedPolicyLabel(policy: Stage4ReseedPolicy) []const u8 {
         .stage3 => "stage3",
         .stage4 => "stage4",
     };
+}
+
+fn printLineageCounts(counts: LineageCounts) void {
+    std.debug.print("[{d},{d},{d}]", .{
+        counts.default_ancestor,
+        counts.stage3_immigrant,
+        counts.stage4_immigrant,
+    });
+}
+
+fn printFirstTicks(first_ticks: LineageFirstTicks) void {
+    const print = std.debug.print;
+    print("[", .{});
+    if (first_ticks.default_ancestor) |tick| {
+        print("{d}", .{tick});
+    } else {
+        print("-", .{});
+    }
+    print(",", .{});
+    if (first_ticks.stage3_immigrant) |tick| {
+        print("{d}", .{tick});
+    } else {
+        print("-", .{});
+    }
+    print(",", .{});
+    if (first_ticks.stage4_immigrant) |tick| {
+        print("{d}", .{tick});
+    } else {
+        print("-", .{});
+    }
+    print("]", .{});
 }
 
 fn parseInjectionMode(arg: []const u8) !struct { mode: Stage4InjectionMode, tick: u32 } {
@@ -154,6 +187,7 @@ pub fn main() !void {
             const s = &scheduler.stats;
             const diag = scheduler.diagnostics();
             const census = scheduler.lineageCensus();
+            const stage4_report = scheduler.stage4LineageReport();
 
             print("t={d:<6} pop={d:<3} avgE={d:<5} avgSz={d:<4} szRange=[{d},{d}] terr={d:<5} maxAge={d:<5} harv={d:<2} ph={d:<2} repl={d:<2}", .{
                 scheduler.tick,
@@ -214,6 +248,15 @@ pub fn main() !void {
                 diag.orphaned_cells,
                 diag.fragmented_cpus,
             });
+            print(" stage4ByP=", .{});
+            printLineageCounts(stage4_report.partials);
+            print(" stage4ByF=", .{});
+            printLineageCounts(stage4_report.fulls);
+            print(" stage4FirstP=", .{});
+            printFirstTicks(stage4_report.first_partial_tick);
+            print(" stage4FirstF=", .{});
+            printFirstTicks(stage4_report.first_full_tick);
+            print("\n", .{});
 
             for (s.harvest_events[0..s.harvest_event_count]) |maybe_event| {
                 if (maybe_event) |event| {
