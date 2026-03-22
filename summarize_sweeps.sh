@@ -61,6 +61,9 @@ echo -e "file\trequested_ticks\tseed\tinject\tenergy\treseed_policy\tstatus\tend
 
 for log in "$@"; do
   [ -e "$log" ] || continue
+  if [ ! -s "$log" ]; then
+    continue
+  fi
 
   requested_ticks="$(requested_ticks_from_path "$log")"
   if [ -n "$requested_ticks" ] && [ "$requested_ticks" -lt "$MIN_REQUESTED_TICKS" ]; then

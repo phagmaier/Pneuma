@@ -29,7 +29,7 @@ for timing in "${STAGE4_TIMINGS[@]}"; do
         timing_slug="${timing//[^[:alnum:]]/_}"
         log="/tmp/pneuma_seed_${seed}_${TICKS}_inj_${timing_slug}_e_${energy}_reseed_${policy}.err"
         echo "=== seed=${seed} ticks=${TICKS} inject=${timing} energy=${energy} reseed=${policy} ==="
-        zig run "$ROOT/src/main.zig" \
+        zig run -O ReleaseFast "$ROOT/src/main.zig" \
           --cache-dir "$CACHE_DIR" \
           --global-cache-dir "$GLOBAL_CACHE_DIR" \
           -- "$TICKS" "$seed" "$timing" "$energy" "$policy" 2> "$log"
